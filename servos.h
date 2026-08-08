@@ -83,6 +83,21 @@ void servoReport(uint8_t ch);
 // trial state machine until spouts have physically arrived.
 bool servoAnyMoving();
 
+// Suppress the idle release on every channel until the given time.
+//
+// Applied for the response window only - the interval during which the
+// subject's behaviour can trigger a withdrawal - so that withdrawal
+// latency does not depend on whether a channel happened to have
+// released. Outside that interval the normal idle release applies, which
+// keeps the motors unpowered during consumption, retraction and the
+// inter-trial interval regardless of how long a trial runs.
+//
+// The deadline is a bound, not a schedule: the hold is normally ended
+// early by servoHoldRelease() as soon as the response is resolved.
+void servoHoldUntil(uint32_t deadlineMs);
+void servoHoldRelease();
+bool servoHoldActive();
+
 void servoUpdate();
 
 uint8_t servoChFromToken(const char* tok);

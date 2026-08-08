@@ -73,6 +73,8 @@ void printHelp() {
   emitInfo(F("BSVAC,<steps>[,<steps_per_sec>]"));
   emitInfo(F("BSTIME,<pre>,<vac_dwell>,<fill_dwell>,<post>"));
   emitInfo(F("BSMODE,<0=parallel|1=one spout at a time>"));
+  emitInfo(F("BSPUMP,<0|1>       use the syringe pump for aspiration"));
+  emitInfo(F("    0 clears the line by dispensing through it instead"));
   emitInfo(F("BSCYCLES,<n>   BSRETURN,<0|1>   BSGO / BSABORT / BSSTATE"));
   emitInfo(F("--- trials ---"));
   emitInfo(F("ARM,<cue>...                stage cues first"));
@@ -477,6 +479,10 @@ void dispatchCommand(char* line) {
       if (blockSetTiming((uint32_t)a.i(1, 0), (uint32_t)a.i(2, 0),
                          (uint32_t)a.i(3, 0), (uint32_t)a.i(4, 0)))
         emitAck(F("BSTIME"));
+      return;
+    }
+    if (eq(verb, "BSPUMP")) {
+      if (blockSetUseStepper(a.i(1, 1) != 0)) emitAck(F("BSPUMP"));
       return;
     }
     if (eq(verb, "BSMODE"))   { if (blockSetMode((uint8_t)a.i(1, 1))) emitAck(F("BSMODE")); return; }

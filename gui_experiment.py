@@ -100,13 +100,13 @@ class SpoutPanel(QGroupBox):
         g.addWidget(self.note, 0, 4, 1, 2)
 
         self.step = QSpinBox(); self.step.setRange(1, 90); self.step.setValue(10)
-        g.addWidget(QLabel("Nudge by"), 1, 0)
+        g.addWidget(QLabel("Increment"), 1, 0)
         g.addWidget(self.step, 1, 1)
-        g.addWidget(_btn("Toward mouse", self.fwd), 1, 2)
-        g.addWidget(_btn("Away", self.back), 1, 3)
+        g.addWidget(_btn("Advance", self.fwd), 1, 2)
+        g.addWidget(_btn("Withdraw", self.back), 1, 3)
 
         self.angle = QSpinBox(); self.angle.setRange(0, 180); self.angle.setValue(90)
-        g.addWidget(QLabel("Go to angle"), 2, 0)
+        g.addWidget(QLabel("Target angle"), 2, 0)
         g.addWidget(self.angle, 2, 1)
         g.addWidget(_btn("Go", self.goto), 2, 2)
         g.addWidget(_btn("Read", self.read), 2, 3)
@@ -122,18 +122,18 @@ class SpoutPanel(QGroupBox):
             "limits.\nThe 0-180 hardware range is always enforced.")
         g.addWidget(self.override, 2, 4, 1, 2)
 
-        self.b_drink = _btn("Use this as DRINKING position", self.capture_extend)
-        self.b_retr = _btn("Use this as RETRACTED position", self.capture_retract)
-        g.addWidget(_btn("Move to retracted", self.goto_retracted), 3, 0, 1, 2)
+        self.b_drink = _btn("Store as delivery position", self.capture_extend)
+        self.b_retr = _btn("Store as withdrawn position", self.capture_retract)
+        g.addWidget(_btn("Drive to withdrawn position", self.goto_retracted), 3, 0, 1, 2)
         g.addWidget(self.b_drink, 3, 2, 1, 2)
         g.addWidget(self.b_retr, 3, 4, 1, 2)
 
         self.slew = QSpinBox(); self.slew.setRange(20, 2000); self.slew.setValue(400)
-        g.addWidget(QLabel("Speed deg/s"), 4, 0)
+        g.addWidget(QLabel("Angular rate (deg/s)"), 4, 0)
         g.addWidget(self.slew, 4, 1)
         g.addWidget(_btn("Apply speed", self.set_slew), 4, 2)
-        g.addWidget(_btn("Go limp", self.detach), 4, 3)
-        g.addWidget(_btn("Move to drinking", self.goto_drinking), 4, 4, 1, 2)
+        g.addWidget(_btn("De-energise", self.detach), 4, 3)
+        g.addWidget(_btn("Drive to delivery position", self.goto_drinking), 4, 4, 1, 2)
 
     # ---- plumbing ----
 
@@ -288,10 +288,10 @@ class LickPanel(QGroupBox):
         row = QHBoxLayout()
         self.ms = QSpinBox(); self.ms.setRange(500, 20000); self.ms.setValue(2000)
         self.ms.setSuffix(" ms")
-        self.b_base = _btn("Step 1: measure resting", self.cal_base)
-        self.b_touch = _btn("Step 2: hold contact", self.cal_touch)
+        self.b_base = _btn("1. Acquire baseline", self.cal_base)
+        self.b_touch = _btn("2. Acquire contact level", self.cal_touch)
         self.b_read = _btn("Read", self.read)
-        self.b_reset = _btn("Reset count", self.reset_count)
+        self.b_reset = _btn("Reset counter", self.reset_count)
         row.addWidget(QLabel("Window")); row.addWidget(self.ms)
         for w in (self.b_base, self.b_touch, self.b_read, self.b_reset):
             row.addWidget(w)
@@ -427,7 +427,7 @@ class InitTab(QWidget):
         outer.addWidget(scroll, 1)
 
         # ---- connection ----
-        g = QGroupBox("Board")
+        g = QGroupBox("Controller connection")
         row = QHBoxLayout(g)
         # Editable: autodetection guesses from USB descriptors, and a
         # clone board or an unusual driver can present a description
@@ -457,7 +457,7 @@ class InitTab(QWidget):
         self.refresh_ports()
 
         # ---- saved settings ----
-        g = QGroupBox("Settings from last time")
+        g = QGroupBox("Stored hardware configuration")
         v = QVBoxLayout(g)
         self.settings_note = QLabel(self.settings.staleness_note())
         self.settings_note.setFont(_mono(9))
@@ -482,7 +482,7 @@ class InitTab(QWidget):
         lay.addWidget(g)
 
         # ---- spouts ----
-        g = QGroupBox("Spout positions")
+        g = QGroupBox("Spout positioning")
         v = QVBoxLayout(g)
         v.addWidget(QLabel(
             "Capture a drinking position for every spout the task uses. "
@@ -512,7 +512,7 @@ class InitTab(QWidget):
         grid = QGridLayout()
         self.sol_ms = QSpinBox(); self.sol_ms.setRange(1, 5000); self.sol_ms.setValue(50)
         self.sol_ul = QDoubleSpinBox(); self.sol_ul.setRange(0.1, 500); self.sol_ul.setValue(3.0)
-        grid.addWidget(QLabel("Pour for ms"), 0, 0); grid.addWidget(self.sol_ms, 0, 1)
+        grid.addWidget(QLabel("Open duration (ms)"), 0, 0); grid.addWidget(self.sol_ms, 0, 1)
         grid.addWidget(QLabel("or \u00b5L"), 0, 4); grid.addWidget(self.sol_ul, 0, 5)
         self.sol_btns = {}
         for i in range(4):
@@ -544,7 +544,7 @@ class InitTab(QWidget):
         lay.addWidget(self.step_table)
 
         # ---- syringe pumps ----
-        g = QGroupBox("Syringe pumps")
+        g = QGroupBox("Syringe pump actuators")
         v = QVBoxLayout(g)
         v.addWidget(QLabel(
             "One pump per spout. These pull the vacuum that clears the "
@@ -568,14 +568,14 @@ class InitTab(QWidget):
         self.watch_ch = QComboBox()
         self.watch_ch.addItems(["Left", "Center", "Right"])
         self.watch_ch.setMinimumWidth(150)
-        self.b_watch = _btn("Start watching", self.watch_start)
-        row.addWidget(QLabel("Watch raw signal from"))
+        self.b_watch = _btn("Start acquisition", self.watch_start)
+        row.addWidget(QLabel("Stream unprocessed signal from"))
         row.addWidget(self.watch_ch)
         row.addWidget(self.b_watch)
         row.addWidget(_btn("Stop", self.watch_stop))
         self.min_off = QSpinBox(); self.min_off.setRange(1, 80); self.min_off.setValue(25)
         self.min_off.setSuffix(" ms")
-        row.addWidget(QLabel("End a lick after"))
+        row.addWidget(QLabel("Contact-offset confirmation window"))
         row.addWidget(self.min_off)
         row.addWidget(_btn("Apply", self.apply_timing))
         row.addStretch()
@@ -608,7 +608,7 @@ class InitTab(QWidget):
         lay.addWidget(g)
 
         # ---- cue check ----
-        g = QGroupBox("Check the cues")
+        g = QGroupBox("Stimulus verification")
         grid = QGridLayout(g)
         self.led_ms = QSpinBox(); self.led_ms.setRange(1, 60000); self.led_ms.setValue(1000)
         self.led_br = QSpinBox(); self.led_br.setRange(0, 255); self.led_br.setValue(255)
@@ -644,9 +644,9 @@ class InitTab(QWidget):
         lay.addWidget(self.modules)
 
         # ---- readiness ----
-        g = QGroupBox("Before the animal goes on")
+        g = QGroupBox("Pre-session verification")
         v = QVBoxLayout(g)
-        v.addWidget(_btn("Run the checks", self.check_ready))
+        v.addWidget(_btn("Verify configuration", self.check_ready))
         self.ready_text = QPlainTextEdit(); self.ready_text.setReadOnly(True)
         self.ready_text.setFont(_mono(9)); self.ready_text.setMinimumHeight(120)
         v.addWidget(self.ready_text)
@@ -1069,13 +1069,13 @@ class RunTab(QWidget):
         grid = QGridLayout(g)
         self.subject = QLineEdit("mouse01")
         self.folder = QLineEdit(os.path.expanduser("~/mouse_data"))
-        grid.addWidget(QLabel("Animal"), 0, 0); grid.addWidget(self.subject, 0, 1)
-        grid.addWidget(QLabel("Save to"), 0, 2); grid.addWidget(self.folder, 0, 3)
+        grid.addWidget(QLabel("Subject identifier"), 0, 0); grid.addWidget(self.subject, 0, 1)
+        grid.addWidget(QLabel("Output directory"), 0, 2); grid.addWidget(self.folder, 0, 3)
         grid.addWidget(_btn("Browse", self.browse), 0, 4)
 
         self.b_start = _btn("Start session", self.start)
-        self.b_pause = _btn("Pause after this trial", self.pause)
-        self.b_stop = _btn("Stop now", self.stop)
+        self.b_pause = _btn("Pause after current trial", self.pause)
+        self.b_stop = _btn("Terminate session", self.stop)
         self.b_pause.setEnabled(False); self.b_stop.setEnabled(False)
         grid.addWidget(self.b_start, 1, 0)
         grid.addWidget(self.b_pause, 1, 1)
@@ -1084,7 +1084,7 @@ class RunTab(QWidget):
         self.refresh_s = QDoubleSpinBox()
         self.refresh_s.setRange(1.0, 300.0); self.refresh_s.setValue(60.0)
         self.refresh_s.setSuffix(" s")
-        grid.addWidget(QLabel("Redraw plot every"), 1, 3)
+        grid.addWidget(QLabel("Raster refresh interval"), 1, 3)
         grid.addWidget(self.refresh_s, 1, 4)
 
         self.state_label = QLabel("no session loaded")
@@ -1198,7 +1198,7 @@ class RunTab(QWidget):
             return
         if self.runner.state is RunState.PAUSED:
             self.runner.resume()
-            self.b_pause.setText("Pause after this trial")
+            self.b_pause.setText("Pause after current trial")
         else:
             self.runner.pause()
             self.b_pause.setText("Resume")
@@ -1292,9 +1292,18 @@ class RunTab(QWidget):
     # ---- raster ----
 
     def _redraw(self):
+        """Repaint the live raster. Wrapped so a drawing fault can never
+        interrupt an session in progress: the plot is a view, and losing
+        the view is not a reason to lose the data."""
         if not self.runner or not self._dirty:
             return
         self._dirty = False
+        try:
+            self._draw_raster()
+        except Exception as exc:
+            self.tail.appendPlainText(f"!! raster not drawn: {exc}")
+
+    def _draw_raster(self):
         self.plot.clear()
 
         cfg = self.runner.cfg
@@ -1320,7 +1329,7 @@ class RunTab(QWidget):
             n = len(r.planned_spouts)
             for k, s in enumerate(r.planned_spouts):
                 off = 0.0 if n == 1 else (-0.24 if k == 0 else 0.24)
-                cue_x += [0.0, s.cue.duration_ms / 1000.0]
+                cue_x += [0.0, s.cue.max_duration_ms() / 1000.0]
                 cue_y += [y + off, y + off]
                 cue_c.append(colour[s.liquid])
 

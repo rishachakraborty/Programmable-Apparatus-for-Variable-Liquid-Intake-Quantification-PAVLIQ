@@ -206,6 +206,12 @@ class BlockSpec:
     # selected trial types can fill on distinct spouts", so a two-spout
     # rig gives 2 and a three-spout rig gives 3 without editing anything.
     n_options: Optional[int] = None
+
+    # Explicit trial count per trial type. When None, the block total is
+    # divided as evenly as possible among the selected types. When
+    # supplied, each type contributes exactly the specified number,
+    # allowing deliberately unequal composition.
+    trial_type_counts: Optional[dict] = None
     # Fired once at block onset. Any combination of modalities - a block
     # is not obliged to be an LED any more than a trial is obliged to be
     # a tone.
@@ -226,6 +232,12 @@ class BlockSpec:
             p.append(f"{self.label}: n_trials must be positive.")
         if not self.trial_type_labels:
             p.append(f"{self.label}: no trial types selected.")
+        if self.trial_type_counts:
+            total = sum(self.trial_type_counts.get(t, 0)
+                        for t in self.trial_type_labels)
+            if total != self.n_trials:
+                p.append(f"{self.label}: per-type counts sum to {total} but "
+                         f"the block total is {self.n_trials}.")
         for t in self.trial_type_labels:
             if t not in known:
                 p.append(f"{self.label}: unknown trial type {t!r}.")
@@ -367,6 +379,13 @@ class SessionConfig:
     purge_gap_ms: int = 150           # rest between pulses, also cooling
     purge_cycles: int = 2
     purge_parallel: bool = True       # all spouts at once; needs a pump each
+    # Whether the syringe pump aspirates during a purge. With this
+    # disabled the line is cleared by dispensing the newly selected
+    # reinforcer through it in the retracted position; the displaced
+    # volume carries the previous solution out of the dead space. This
+    # requires no pump but discards more liquid and reaches a given
+    # purity more slowly.
+    purge_use_pump: bool = True
 
     operant: OperantDesign = field(default_factory=OperantDesign)
     random_reward: RandomRewardConfig = field(
@@ -1211,7 +1230,22 @@ def _generate_single_block(block, n, level, block_pos, cfg, by_label, rng, carry
     types = [t for t in block.trial_type_labels
              if by_label[t].liquid == liquid]
 
-    counts = dict(zip(types, _even_split(n, len(types), rng)))
+    if block.trial_type_counts:
+        counts = {t: int(block.trial_type_counts.get(t, 0)) for t in types}
+        counts = {t: c for t, c in counts.items() if c > 0}
+        # Rescale when this block has been split across schedule levels.
+        want = sum(counts.values())
+        if want and want != n:
+            scaled = _even_split(n, want, rng)
+            flat = [t for t, c in counts.items() for _ in range(c)]
+            rng.shuffle(flat)
+            counts = {}
+            for t in flat[:n]:
+                counts[t] = counts.get(t, 0) + 1
+    else:
+        counts = dict(zip(types, _even_split(n, len(types), rng)))
+    if not counts:
+        return []
     seq = _balanced_sequence(counts, n, cfg.balance_window,
                              cfg.max_repeat, rng, carry.get("types"))
 

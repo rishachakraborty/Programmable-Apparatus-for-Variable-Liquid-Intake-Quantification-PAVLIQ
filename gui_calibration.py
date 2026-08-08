@@ -230,7 +230,15 @@ class CalibrationPanel(QGroupBox):
         self.fill_ul.setValue(4.0); self.fill_ul.setSuffix(" \u00b5L")
         self.pulses = QSpinBox(); self.pulses.setRange(1, 20); self.pulses.setValue(3)
         self.cycles = QSpinBox(); self.cycles.setRange(1, 10); self.cycles.setValue(2)
-        self.parallel = QCheckBox("Purge all spouts at once")
+        self.use_pump = QCheckBox("Aspirate with the syringe pump")
+        self.use_pump.setChecked(True)
+        self.use_pump.setToolTip(
+            "When enabled, the pump withdraws the dead volume before the "
+            "line is refilled. When disabled, the line is cleared by "
+            "dispensing the newly selected reinforcer through it in the "
+            "retracted position; this requires no pump but discards more "
+            "liquid and reaches a given purity more slowly.")
+        self.parallel = QCheckBox("Purge all spouts concurrently")
         self.parallel.setChecked(True)
         self.parallel.setToolTip(
             "Needs one pump per spout. Roughly halves the switch, which "
@@ -247,7 +255,8 @@ class CalibrationPanel(QGroupBox):
             pg_.addWidget(w, 1, i * 2 + 1)
         pg_.addWidget(QLabel("Gap between pulses"), 2, 0)
         pg_.addWidget(self.gap_ms, 2, 1)
-        pg_.addWidget(self.parallel, 2, 2, 1, 3)
+        pg_.addWidget(self.use_pump, 2, 2, 1, 2)
+        pg_.addWidget(self.parallel, 2, 4, 1, 3)
         self.purge_note = QLabel("")
         self.purge_note.setFont(_mono(9))
         self.purge_note.setWordWrap(True)
@@ -337,6 +346,7 @@ class CalibrationPanel(QGroupBox):
     def purge_settings(self) -> dict:
         return {"purge_vac_ul": self.vac_ul.value(),
                 "purge_gap_ms": self.gap_ms.value(),
+                "purge_use_pump": self.use_pump.isChecked(),
                 "purge_fill_ul": self.fill_ul.value(),
                 "purge_pulses": self.pulses.value(),
                 "purge_cycles": self.cycles.value(),

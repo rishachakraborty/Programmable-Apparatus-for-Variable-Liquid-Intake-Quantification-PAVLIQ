@@ -65,6 +65,7 @@ static uint32_t g_fillDwellMs = 500;
 static uint32_t g_postMs      = 250;
 // 1 = one spout at a time, 0 = every configured spout in parallel.
 static uint8_t  g_sequential  = 1;
+static bool     g_useStepper  = true;
 static uint8_t  g_cycles      = 2;
 // OFF by default. The return stroke pushes whatever was aspirated back
 // down the line. That is correct if the syringe pulls into a waste trap
@@ -148,6 +149,8 @@ bool blockSetTiming(uint32_t preMs, uint32_t vacDwellMs,
 
 bool blockSetMode(uint8_t sequential) { g_sequential = sequential ? 1 : 0; return true; }
 
+bool blockSetUseStepper(bool use) { g_useStepper = use; return true; }
+
 bool blockSetCycles(uint8_t n) {
   if (n == 0 || n > BLK_MAX_CYCLES) { emitErr(F("BLOCK_CYCLES_OUT_OF_RANGE")); return false; }
   g_cycles = n;
@@ -171,8 +174,14 @@ static uint8_t countActive() {
 
 // Aspirate on one axis, or on every configured axis at once when the
 // sequencer is in parallel mode.
+// Aspiration is optional. When no syringe pump is fitted, or when the
+// pump is deliberately excluded, the line is cleared by running the
+// newly selected reinforcer through it in the retracted position: the
+// displaced volume carries the previous solution out of the dead space.
+// This is slower to reach a given purity and discards more liquid than
+// aspiration, but requires no pump.
 static void startVac() {
-  if (g_vacSteps == 0) { enter(BS_VAC_DWELL); return; }
+  if (g_vacSteps == 0 || !g_useStepper) { enter(BS_VAC_DWELL); return; }
 
   bool any = false;
   for (uint8_t k = 0; k < SV_COUNT; k++) {
@@ -209,7 +218,7 @@ static void startFill() {
 }
 
 static void finishSequence() {
-  if (g_return) {
+  if (g_return && g_useStepper) {
     bool started = false;
     for (uint8_t k = 0; k < SV_COUNT; k++) {
       if (!g_bs[k].active || g_aspirated[k] == 0) continue;
@@ -230,7 +239,7 @@ bool blockStart() {
   if (!g_defined)     { emitErr(F("BLOCK_NOT_DEFINED")); return false; }
   if (trialRunning()) { emitErr(F("BLOCK_TRIAL_IN_PROGRESS")); return false; }
   if (countActive() == 0) { emitErr(F("BLOCK_NO_SPOUTS_CONFIGURED")); return false; }
-  if (g_vacSteps > 0) {
+  if (g_vacSteps > 0 && g_useStepper) {
     for (uint8_t k = 0; k < SV_COUNT; k++) {
       if (!g_bs[k].active) continue;
       if (!stepperPresent(k)) {
@@ -292,6 +301,7 @@ void blockReport() {
   Serial.print(g_fillDwellMs);   Serial.print(',');
   Serial.print(g_postMs);        Serial.print(',');
   Serial.print(g_sequential);    Serial.print(',');
+  Serial.print(g_useStepper ? 1 : 0); Serial.print(',');
   Serial.print(g_cycles);        Serial.print(',');
   Serial.println(g_return ? 1 : 0);
 }

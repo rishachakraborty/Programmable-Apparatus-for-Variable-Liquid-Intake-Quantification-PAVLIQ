@@ -287,7 +287,9 @@ class SessionRunner:
         try:
             self.link.block_switch(
                 block_id=planned.index, spouts=spouts, vac_steps=steps,
-                cycles=cfg.purge_cycles, sequential=not cfg.purge_parallel)
+                cycles=cfg.purge_cycles, sequential=not cfg.purge_parallel,
+                use_pump=cfg.purge_use_pump,
+                gap_ms=getattr(cfg, "purge_gap_ms", 150))
         except Exception as e:
             # Do not proceed as if the lines were clean. The next trial
             # would deliver the previous block's solution under the new

@@ -142,6 +142,13 @@ bool trialSetTiming(uint32_t cueRewardMs, uint32_t omissionMs,
     emitErr(F("TRIAL_OMISSION_WINDOW_SHORTER_THAN_CUE_REWARD_DELAY"));
     return false;
   }
+  if (omissionMs > SERVO_HOLD_WARN_MS) {
+    // The actuators stay energised for the response window. A long one
+    // is legitimate, but it is worth knowing that the motors will be
+    // powered for that duration on every trial.
+    emitInfo(F("Response window is long; actuators stay energised for it."));
+    emitInfo(F("Reduce it, or fit actuators rated for continuous hold."));
+  }
   g_cueRewardMs  = cueRewardMs;
   g_omissionMs   = omissionMs;
   g_retractDelay = retractDelayMs;
@@ -197,6 +204,7 @@ void trialAbort() {
   spkStopAll();
   for (uint8_t k = 0; k < SV_COUNT; k++) servoGoRetract(k);
   g_outcome = TR_OUT_ABORT;
+  servoHoldRelease();
   emitEvent(now, "TRIAL_END", "", (long)g_id, (long)TR_OUT_ABORT);
   enter(TS_IDLE);
   g_state = TS_IDLE;
@@ -255,6 +263,13 @@ void trialUpdate() {
         }
         armFireStaged();          // all cues start in one loop pass
         g_cueMs = millis();
+        // Suppress the idle release for the response window. A
+        // withdrawal can be triggered by the subject at any point
+        // within it, and only within it, so this is the whole interval
+        // during which the actuators must stay energised. A small
+        // margin covers the interval between the omission deadline and
+        // the state machine acting on it.
+        servoHoldUntil(g_cueMs + g_omissionMs + 250UL);
         emitEvent(g_cueMs, "TRIAL_CUE", "", (long)g_id, (long)g_mode);
         enter(TS_RESPOND);
       }
@@ -268,13 +283,24 @@ void trialUpdate() {
             g_chosen = (int8_t)k;
             emitEvent(now, "TRIAL_CHOICE", chName(g_chosen),
                       (long)(now - g_cueMs), (long)lickCount(k));
+            if (g_mode != 1) servoHoldRelease();
             if (g_mode == 1) {
-              // Retract the alternative immediately so the animal
-              // cannot sample both and count licks on each.
+              // Withdraw the alternatives on the first detected response,
+              // which prevents sampling of more than one option within a
+              // trial. Latency from response to command is reported so it
+              // can be verified against the log rather than assumed.
               for (uint8_t j = 0; j < SV_COUNT; j++) {
-                if (j != (uint8_t)g_chosen && g_sp[j].active) servoGoRetract(j);
+                if (j != (uint8_t)g_chosen && g_sp[j].active) {
+                  servoGoRetract(j);
+                  emitEvent(millis(), "TRIAL_ALT_RETRACT", chName((int8_t)j),
+                            (long)(millis() - now), 0);
+                }
               }
             }
+            // The response is resolved, so no further movement depends
+            // on the subject. Normal idle release resumes and the
+            // actuators de-energise for the remainder of the trial.
+            servoHoldRelease();
             break;
           }
         }
@@ -301,6 +327,7 @@ void trialUpdate() {
         g_outcome = TR_OUT_OMISSION;
         emitEvent(now, "TRIAL_OMISSION", chName(g_chosen),
                   (long)(g_chosen >= 0 ? lickCount(g_chosen) : 0), 0);
+        servoHoldRelease();
         for (uint8_t k = 0; k < SV_COUNT; k++) servoGoRetract(k);
         enter(TS_ITI);
       }
@@ -334,6 +361,7 @@ void trialUpdate() {
       if (quiet && (now - lickLastEventMs()) >= g_gateMs &&
           inState(now) >= g_gateMs) {
         emitEvent(now, "TRIAL_END", "", (long)g_id, (long)g_outcome);
+        servoHoldRelease();
         g_state   = TS_IDLE;
         g_defined = false;
       }

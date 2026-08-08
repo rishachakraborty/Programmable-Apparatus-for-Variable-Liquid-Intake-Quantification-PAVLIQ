@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 import theme
 from theme import c as tc
 from calibration import CalibrationSet
+from gui_cue import describe_cue, edit_cue
 from task_design import (
     BlockSpec, CueSet, LedCue, OlfactoryCue, OperantDesign, OtherCue,
     RandomRewardConfig, SessionConfig, SpeakerCue, TrialType, audit_session,
@@ -52,6 +53,15 @@ def C_BLOCK():    return tc("warn")
 SPOUT_LABELS = {"l": "Left", "c": "Center", "r": "Right"}
 
 
+def _default_trial_cue() -> CueSet:
+    return CueSet(speaker=SpeakerCue(duration_ms=500, tone_hz=10000,
+                                     click_train=True, click_hz=50, volume=50))
+
+
+def _default_block_cue() -> CueSet:
+    return CueSet(led=LedCue(channel="w", duration_ms=2000, brightness=255))
+
+
 def _btn_local(text, fn) -> QPushButton:
     b = QPushButton(text)
     b.clicked.connect(fn)
@@ -68,12 +78,10 @@ def _mono(size=10) -> QFont:
 # Trial type table
 # =====================================================================
 
-# One row per trial type. The four leading checkboxes are the cue
-# modalities: nothing forces a trial to be a tone, and any combination
-# is legal as long as at least one is ticked.
-TT_COLS = ["Name", "Liquid", "Tone", "Light", "Odour", "Other",
-           "Tone Hz", "Clicks", "Click Hz", "Loudness", "Cue ms",
-           "LED", "Reward \u00b5L", "Reward %"]
+# One row per trial type. The stimulus is edited in a dedicated dialog
+# that exposes every parameter of every modality, so the columns here
+# stay readable regardless of how many modalities a design uses.
+TT_COLS = ["Name", "Liquid", "Stimulus", "Reward volume", "Reward probability"]
 
 
 class TrialTypeTable(QTableWidget):
@@ -85,18 +93,15 @@ class TrialTypeTable(QTableWidget):
         self.verticalHeader().setVisible(False)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.horizontalHeader().setStretchLastSection(True)
-        self.setColumnWidth(0, 130)
-        for i in range(1, len(TT_COLS)):
-            self.setColumnWidth(i, 116)
-        self.verticalHeader().setDefaultSectionSize(30)
-        # Eight rows visible instead of one. A table you have to scroll to
-        # see a single row in is unusable for comparing trial types, which
-        # is the whole reason they are in a table.
-        self.setMinimumHeight(280)
+        for i, w in enumerate((150, 150, 300, 150, 160)):
+            self.setColumnWidth(i, w)
+        self.verticalHeader().setDefaultSectionSize(32)
+        self.setMinimumHeight(300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
         self._liquids: list[str] = []
         self._volumes: list = [1.0, 3.0, 6.0, 10.0]
+        self._cues: list = []
 
     def set_liquids(self, liquids: list[str]) -> None:
         self._liquids = liquids
@@ -110,81 +115,13 @@ class TrialTypeTable(QTableWidget):
                 combo.setCurrentText(cur)
             combo.blockSignals(False)
 
-    def add_row(self, tt: Optional[dict] = None) -> None:
-        tt = tt or {}
-        r = self.rowCount()
-        self.insertRow(r)
-
-        name = QLineEdit(tt.get("label", f"type_{r + 1}"))
-        name.textChanged.connect(self.changed)
-        self.setCellWidget(r, 0, name)
-
-        def check(col, on):
-            cb = QCheckBox()
-            cb.setChecked(on)
-            cb.stateChanged.connect(self.changed)
-            self.setCellWidget(r, col, cb)
-            return cb
-
-        liquid = QComboBox()
-        liquid.setEditable(True)
-        liquid.setMinimumWidth(130)
-        liquid.addItems(self._liquids)
-        liquid.setCurrentText(tt.get("liquid", self._liquids[0]
-                                     if self._liquids else ""))
-        liquid.currentTextChanged.connect(self.changed)
-        self.setCellWidget(r, 1, liquid)
-
-        check(2, tt.get("use_tone", True))
-        check(3, tt.get("use_led", False))
-        check(4, tt.get("use_olf", False))
-        check(5, tt.get("use_other", False))
-
-        def spin(lo, hi, val, step=1):
-            sb = QSpinBox()
-            sb.setRange(lo, hi)
-            sb.setSingleStep(step)
-            sb.setValue(int(val))
-            sb.valueChanged.connect(self.changed)
-            return sb
-
-        self.setCellWidget(r, 6, spin(20, 40000, tt.get("tone_hz", 10000), 500))
-
-        clicks = QCheckBox()
-        clicks.setChecked(tt.get("click_train", True))
-        clicks.stateChanged.connect(self.changed)
-        self.setCellWidget(r, 7, clicks)
-
-        self.setCellWidget(r, 8, spin(1, 1000, tt.get("click_hz", 50), 10))
-        self.setCellWidget(r, 9, spin(0, 50, tt.get("loudness", 50), 5))
-        self.setCellWidget(r, 10, spin(1, 60000, tt.get("duration_ms", 500), 50))
-
-        led = QComboBox()
-        led.addItems(["White", "Blue", "Green"])
-        led.setMinimumWidth(110)
-        led.setCurrentIndex("wbg".index(tt.get("led_channel", "w")[:1]))
-        led.currentIndexChanged.connect(self.changed)
-        self.setCellWidget(r, 11, led)
-
-        # Volume, not milliseconds. The dropdown offers what the
-        # calibration table already covers; Other... accepts anything and
-        # is interpolated, which is sound between measured points and a
-        # guess outside them.
-        vol = QComboBox()
-        vol.setEditable(True)
-        vol.setMinimumWidth(120)
-        self._fill_volumes(vol, tt.get("volume_ul", 3.0))
-        vol.currentTextChanged.connect(self.changed)
-        self.setCellWidget(r, 12, vol)
-
-        pct = QDoubleSpinBox()
-        pct.setRange(0.0, 100.0)
-        pct.setDecimals(1)
-        pct.setValue(float(tt.get("reward_contingency_pct", 100.0)))
-        pct.valueChanged.connect(self.changed)
-        self.setCellWidget(r, 13, pct)
-
-        self.changed.emit()
+    def set_volumes(self, volumes) -> None:
+        """Offer the volumes covered by the solenoid calibration table."""
+        self._volumes = list(volumes)
+        for r in range(self.rowCount()):
+            w = self.cellWidget(r, 3)
+            if w is not None:
+                self._fill_volumes(w, self._value_of(w))
 
     def _fill_volumes(self, combo, current):
         combo.blockSignals(True)
@@ -195,14 +132,6 @@ class TrialTypeTable(QTableWidget):
         combo.setCurrentText(f"{float(current):g}")
         combo.blockSignals(False)
 
-    def set_volumes(self, volumes) -> None:
-        """Offer the volumes the calibration table actually covers."""
-        self._volumes = list(volumes)
-        for r in range(self.rowCount()):
-            w = self.cellWidget(r, 12)
-            if w is not None:
-                self._fill_volumes(w, self._value_of(w))
-
     @staticmethod
     def _value_of(combo) -> float:
         try:
@@ -210,11 +139,78 @@ class TrialTypeTable(QTableWidget):
         except ValueError:
             return 3.0
 
+    def add_row(self, tt: Optional[dict] = None) -> None:
+        tt = tt or {}
+        r = self.rowCount()
+        self.insertRow(r)
+
+        name = QLineEdit(tt.get("label", f"type_{r + 1}"))
+        name.textChanged.connect(self.changed)
+        self.setCellWidget(r, 0, name)
+
+        liquid = QComboBox()
+        liquid.setEditable(True)
+        liquid.setMinimumWidth(140)
+        liquid.addItems(self._liquids)
+        liquid.setCurrentText(tt.get("liquid", self._liquids[0]
+                                     if self._liquids else ""))
+        liquid.currentTextChanged.connect(self.changed)
+        self.setCellWidget(r, 1, liquid)
+
+        cue = tt.get("cue") or _default_trial_cue()
+        while len(self._cues) <= r:
+            self._cues.append(CueSet())
+        self._cues[r] = cue
+        btn = QPushButton(describe_cue(cue))
+        btn.clicked.connect(lambda _=False, row=r: self._edit_cue(row))
+        self.setCellWidget(r, 2, btn)
+
+        vol = QComboBox()
+        vol.setEditable(True)
+        vol.setMinimumWidth(130)
+        self._fill_volumes(vol, tt.get("volume_ul", 3.0))
+        vol.currentTextChanged.connect(self.changed)
+        self.setCellWidget(r, 3, vol)
+
+        pct = QDoubleSpinBox()
+        pct.setRange(0.0, 100.0)
+        pct.setDecimals(1)
+        pct.setSuffix(" %")
+        pct.setValue(float(tt.get("reward_contingency_pct", 100.0)))
+        pct.valueChanged.connect(self.changed)
+        self.setCellWidget(r, 4, pct)
+
+        self.changed.emit()
+
+    def _edit_cue(self, row: int) -> None:
+        label = self.cellWidget(row, 0).text() or f"trial type {row + 1}"
+        new = edit_cue(self, self._cues[row], f"Stimulus for {label}")
+        if new is None:
+            return
+        self._cues[row] = new
+        self.cellWidget(row, 2).setText(describe_cue(new))
+        self.changed.emit()
+
     def remove_selected(self) -> None:
         rows = sorted({i.row() for i in self.selectedIndexes()}, reverse=True)
         for r in rows:
             self.removeRow(r)
+            if r < len(self._cues):
+                self._cues.pop(r)
+        self._rebind()
         self.changed.emit()
+
+    def _rebind(self) -> None:
+        """Reconnect stimulus buttons after rows shift."""
+        for r in range(self.rowCount()):
+            btn = self.cellWidget(r, 2)
+            if btn is None:
+                continue
+            try:
+                btn.clicked.disconnect()
+            except TypeError:
+                pass
+            btn.clicked.connect(lambda _=False, row=r: self._edit_cue(row))
 
     def to_dicts(self) -> list[dict]:
         out = []
@@ -222,18 +218,9 @@ class TrialTypeTable(QTableWidget):
             out.append({
                 "label": self.cellWidget(r, 0).text().strip(),
                 "liquid": self.cellWidget(r, 1).currentText().strip(),
-                "use_tone": self.cellWidget(r, 2).isChecked(),
-                "use_led": self.cellWidget(r, 3).isChecked(),
-                "use_olf": self.cellWidget(r, 4).isChecked(),
-                "use_other": self.cellWidget(r, 5).isChecked(),
-                "tone_hz": self.cellWidget(r, 6).value(),
-                "click_train": self.cellWidget(r, 7).isChecked(),
-                "click_hz": self.cellWidget(r, 8).value(),
-                "loudness": self.cellWidget(r, 9).value(),
-                "duration_ms": self.cellWidget(r, 10).value(),
-                "led_channel": "wbg"[self.cellWidget(r, 11).currentIndex()],
-                "volume_ul": self._value_of(self.cellWidget(r, 12)),
-                "reward_contingency_pct": self.cellWidget(r, 13).value(),
+                "cue": self._cues[r] if r < len(self._cues) else CueSet(),
+                "volume_ul": self._value_of(self.cellWidget(r, 3)),
+                "reward_contingency_pct": self.cellWidget(r, 4).value(),
             })
         return out
 
@@ -246,170 +233,288 @@ class TrialTypeTable(QTableWidget):
 # =====================================================================
 
 class BlockEditor(QGroupBox):
+    """
+    One block definition.
+
+    A block may be included in or excluded from the experiment without
+    being deleted, so alternative designs can be compared without
+    re-entering their parameters. Trial-type composition is either
+    distributed uniformly across the selected types or specified
+    explicitly per type.
+    """
     changed = pyqtSignal()
     remove_requested = pyqtSignal(object)
+    move_requested = pyqtSignal(object, int)
 
     def __init__(self, index: int):
         super().__init__(f"Block {index + 1}")
-        self.setCheckable(False)
         grid = QGridLayout(self)
+
+        self.enabled = QCheckBox("Include in experiment")
+        self.enabled.setChecked(True)
+        self.enabled.setToolTip(
+            "Excluded blocks are retained with all their parameters but "
+            "contribute no trials to the generated session.")
+        grid.addWidget(self.enabled, 0, 0, 1, 2)
 
         self.name = QLineEdit(f"block_{index + 1}")
         self.kind = QComboBox()
         self.kind.addItems(["single", "choice"])
-        self.kind.setMinimumWidth(130)
+        self.kind.setMinimumWidth(140)
         self.n_trials = QSpinBox()
         self.n_trials.setRange(1, 100000)
         self.n_trials.setValue(100)
 
-        self.liquids = QLineEdit()
-        self.liquids.setPlaceholderText("alcohol            (choice: alcohol, water)")
+        grid.addWidget(QLabel("Identifier"), 0, 2)
+        grid.addWidget(self.name, 0, 3)
+        grid.addWidget(QLabel("Structure"), 0, 4)
+        grid.addWidget(self.kind, 0, 5)
+        grid.addWidget(QLabel("Total trials"), 0, 6)
+        grid.addWidget(self.n_trials, 0, 7)
 
-        grid.addWidget(QLabel("Name"), 0, 0)
-        grid.addWidget(self.name, 0, 1)
-        grid.addWidget(QLabel("Type"), 0, 2)
-        grid.addWidget(self.kind, 0, 3)
-        grid.addWidget(QLabel("Trials"), 0, 4)
-        grid.addWidget(self.n_trials, 0, 5)
-
-        # How many options are offered at once. Auto uses as many as the
-        # selected trial types can fill on distinct spouts, so a third
-        # spout turns a two-choice block into three-way with no edit.
         self.n_options = QComboBox()
-        self.n_options.addItems(["Auto", "2 at a time", "3 at a time",
-                                 "4 at a time"])
-        self.n_options.setMinimumWidth(150)
+        self.n_options.addItems(["Automatic", "2 simultaneous options",
+                                 "3 simultaneous options",
+                                 "4 simultaneous options"])
+        self.n_options.setMinimumWidth(210)
         self.n_options.setToolTip(
-            "Two options cannot be offered at once if they come from the "
-            "same spout, so the trial types selected below must span at "
-            "least this many spouts.")
-        grid.addWidget(QLabel("Options"), 0, 6)
-        grid.addWidget(self.n_options, 0, 7)
-        grid.addWidget(QLabel("Liquids"), 1, 0)
-        grid.addWidget(self.liquids, 1, 1, 1, 5)
+            "Number of reinforcers presented concurrently on each trial. "
+            "Two reinforcers cannot be presented concurrently if they are "
+            "delivered through the same spout, so the selected trial types "
+            "must span at least this many spouts. Automatic uses the "
+            "largest number the selected trial types can satisfy.")
+        self.liquids = QLineEdit()
+        self.liquids.setPlaceholderText(
+            "reinforcers in this block, comma separated")
+        grid.addWidget(QLabel("Reinforcers"), 1, 0)
+        grid.addWidget(self.liquids, 1, 1, 1, 3)
+        grid.addWidget(QLabel("Concurrent options"), 1, 4)
+        grid.addWidget(self.n_options, 1, 5, 1, 3)
 
-        grid.addWidget(QLabel("Trial types in this block"), 2, 0, 1, 2)
-        self.types = QListWidget()
-        self.types.setSelectionMode(
-            QAbstractItemView.SelectionMode.MultiSelection)
-        self.types.setMinimumHeight(150)
-        grid.addWidget(self.types, 3, 0, 1, 6)
+        # ---- trial composition ----
+        comp = QGroupBox("Trial-type composition")
+        cv = QVBoxLayout(comp)
+        self.uniform = QCheckBox(
+            "Distribute total trials uniformly across selected trial types")
+        self.uniform.setChecked(True)
+        self.uniform.setToolTip(
+            "When enabled, the total above is divided as evenly as "
+            "possible among the selected types. When disabled, the trial "
+            "count for each type is specified individually and the total "
+            "is their sum.")
+        self.uniform.stateChanged.connect(self._uniform_changed)
+        cv.addWidget(self.uniform)
 
-        cue_box = QGroupBox("Cue at block onset")
-        cue_form = QHBoxLayout(cue_box)
-        # A block is no more obliged to be an LED than a trial is obliged
-        # to be a tone. Tick whatever combination the design calls for.
-        # Uncued switches matter for reversal designs: the contingency
-        # changes and the animal has to notice from the outcomes alone.
-        self.uncued = QCheckBox("No cue at all (uncued switch)")
+        self.types = QTableWidget(0, 3)
+        self.types.setHorizontalHeaderLabels(
+            ["Include", "Trial type", "Trials"])
+        self.types.verticalHeader().setVisible(False)
+        self.types.horizontalHeader().setStretchLastSection(True)
+        for i, w in enumerate((90, 260, 120)):
+            self.types.setColumnWidth(i, w)
+        self.types.verticalHeader().setDefaultSectionSize(28)
+        self.types.setMinimumHeight(180)
+        cv.addWidget(self.types)
+
+        self.total_note = QLabel("")
+        self.total_note.setFont(_mono(9))
+        cv.addWidget(self.total_note)
+        grid.addWidget(comp, 2, 0, 1, 8)
+
+        # ---- transition stimulus ----
+        cue_box = QGroupBox("Block-transition stimulus")
+        ch = QHBoxLayout(cue_box)
+        self.uncued = QCheckBox("Unsignalled transition")
         self.uncued.setToolTip(
-            "For reversal learning, where the block change must not be "
-            "signalled. Everything else about the block is unchanged.")
-        self.cue_on = QCheckBox("LED")
-        self.cue_on.setChecked(True)
-        self.cue_tone = QCheckBox("Tone")
-        self.cue_olf = QCheckBox("Odour")
-        self.cue_other = QCheckBox("Other")
-        self.cue_tone_hz = QSpinBox(); self.cue_tone_hz.setRange(20, 40000)
-        self.cue_tone_hz.setValue(8000)
-        self.cue_ch = QComboBox()
-        self.cue_ch.addItems(["White LED", "Blue LED", "Green LED"])
-        self.cue_ch.setMinimumWidth(140)
-        self.cue_ms = QSpinBox(); self.cue_ms.setRange(1, 60000); self.cue_ms.setValue(2000)
-        self.cue_pulse = QCheckBox("Pulsing")
-        self.cue_hz = QSpinBox(); self.cue_hz.setRange(1, 100); self.cue_hz.setValue(10)
-        self.cue_bright = QSpinBox(); self.cue_bright.setRange(0, 255); self.cue_bright.setValue(255)
-        for w in (self.uncued, self.cue_on, self.cue_ch, QLabel("ms"), self.cue_ms,
-                  self.cue_pulse, QLabel("Hz"), self.cue_hz,
-                  QLabel("Bright"), self.cue_bright,
-                  self.cue_tone, QLabel("tone Hz"), self.cue_tone_hz,
-                  self.cue_olf, self.cue_other):
-            cue_form.addWidget(w)
-        cue_form.addStretch()
-        grid.addWidget(cue_box, 4, 0, 1, 6)
+            "No stimulus marks the change of block. Used in reversal "
+            "designs, where the contingency change must be detected from "
+            "outcomes rather than from an explicit signal.")
+        self.uncued.stateChanged.connect(self._uncued_changed)
+        ch.addWidget(self.uncued)
+        self.cue = _default_block_cue()
+        self.b_cue = QPushButton(describe_cue(self.cue))
+        self.b_cue.clicked.connect(self._edit_cue)
+        ch.addWidget(QLabel("Stimulus"))
+        ch.addWidget(self.b_cue, 1)
+        grid.addWidget(cue_box, 3, 0, 1, 8)
 
-        rm = QPushButton("Remove this block")
+        row = QHBoxLayout()
+        row.addWidget(_btn_local("Move up", lambda: self.move_requested.emit(self, -1)))
+        row.addWidget(_btn_local("Move down", lambda: self.move_requested.emit(self, 1)))
+        row.addStretch()
+        rm = QPushButton("Delete this block")
         rm.clicked.connect(lambda: self.remove_requested.emit(self))
-        grid.addWidget(rm, 5, 5)
+        row.addWidget(rm)
+        hold = QWidget(); hold.setLayout(row)
+        grid.addWidget(hold, 4, 0, 1, 8)
 
         for w in (self.name, self.liquids):
             w.textChanged.connect(self.changed)
         self.kind.currentTextChanged.connect(self.changed)
-        for w in (self.n_trials, self.cue_ms, self.cue_hz, self.cue_bright):
-            w.valueChanged.connect(self.changed)
-        for w in (self.cue_on, self.cue_pulse, self.cue_tone, self.cue_olf,
-                  self.cue_other, self.uncued):
-            w.stateChanged.connect(self.changed)
-        self.uncued.stateChanged.connect(self._uncued_changed)
         self.n_options.currentIndexChanged.connect(self.changed)
-        self.cue_tone_hz.valueChanged.connect(self.changed)
-        self.types.itemSelectionChanged.connect(self.changed)
+        self.n_trials.valueChanged.connect(self._recount)
+        self.enabled.stateChanged.connect(self.changed)
+        self.types.itemChanged.connect(self._recount)
+
+        self._uniform_changed()
+
+    # ---- stimulus ----
+
+    def _edit_cue(self):
+        new = edit_cue(self, self.cue,
+                       f"Block-transition stimulus for {self.name.text()}")
+        if new is None:
+            return
+        self.cue = new
+        self.b_cue.setText(describe_cue(new))
+        self.changed.emit()
 
     def _uncued_changed(self):
         on = not self.uncued.isChecked()
-        for w in (self.cue_on, self.cue_ch, self.cue_ms, self.cue_pulse,
-                  self.cue_hz, self.cue_bright, self.cue_tone,
-                  self.cue_tone_hz, self.cue_olf, self.cue_other):
-            w.setEnabled(on)
+        self.b_cue.setEnabled(on)
+        self.changed.emit()
+
+    # ---- composition ----
 
     def refresh_types(self, labels: list[str]) -> None:
-        keep = {i.text() for i in self.types.selectedItems()}
+        """Rebuild the trial-type list, preserving selections and counts."""
+        prev = {lab: (inc, n) for lab, inc, n in self._rows()}
         self.types.blockSignals(True)
-        self.types.clear()
+        self.types.setRowCount(0)
         for lab in labels:
-            it = QListWidgetItem(lab)
-            self.types.addItem(it)
-            if lab in keep:
-                it.setSelected(True)
+            r = self.types.rowCount()
+            self.types.insertRow(r)
+            inc = QTableWidgetItem()
+            inc.setFlags(Qt.ItemFlag.ItemIsUserCheckable
+                         | Qt.ItemFlag.ItemIsEnabled)
+            was_in = prev.get(lab, (False, 0))[0]
+            inc.setCheckState(Qt.CheckState.Checked if was_in
+                              else Qt.CheckState.Unchecked)
+            self.types.setItem(r, 0, inc)
+
+            name = QTableWidgetItem(lab)
+            name.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.types.setItem(r, 1, name)
+
+            cnt = QTableWidgetItem(str(prev.get(lab, (False, 0))[1]))
+            self.types.setItem(r, 2, cnt)
+        self.types.blockSignals(False)
+        self._recount()
+
+    def _rows(self):
+        for r in range(self.types.rowCount()):
+            inc = self.types.item(r, 0)
+            nm = self.types.item(r, 1)
+            cnt = self.types.item(r, 2)
+            if inc is None or nm is None:
+                continue
+            try:
+                n = int(float(cnt.text())) if cnt and cnt.text() else 0
+            except ValueError:
+                n = 0
+            yield nm.text(), inc.checkState() == Qt.CheckState.Checked, n
+
+    def _uniform_changed(self):
+        editable = not self.uniform.isChecked()
+        self.n_trials.setEnabled(self.uniform.isChecked())
+        self.types.blockSignals(True)
+        for r in range(self.types.rowCount()):
+            it = self.types.item(r, 2)
+            if it is None:
+                continue
+            flags = (Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            if editable:
+                flags |= Qt.ItemFlag.ItemIsEditable
+            it.setFlags(flags)
+        self.types.blockSignals(False)
+        self._recount()
+
+    def _recount(self):
+        """Recompute and display per-type trial counts."""
+        rows = list(self._rows())
+        selected = [lab for lab, inc, _ in rows if inc]
+
+        self.types.blockSignals(True)
+        if self.uniform.isChecked():
+            n = self.n_trials.value()
+            k = len(selected)
+            base, rem = (n // k, n % k) if k else (0, 0)
+            for r, (lab, inc, _) in enumerate(rows):
+                give = 0
+                if inc:
+                    i = selected.index(lab)
+                    give = base + (1 if i < rem else 0)
+                it = self.types.item(r, 2)
+                if it is not None:
+                    it.setText(str(give))
+            total = n if selected else 0
+        else:
+            for r, (lab, inc, n) in enumerate(rows):
+                if not inc:
+                    it = self.types.item(r, 2)
+                    if it is not None:
+                        it.setText("0")
+            total = sum(n for _lab, inc, n in self._rows() if inc)
         self.types.blockSignals(False)
 
+        if not selected:
+            self.total_note.setText("No trial types selected: this block "
+                                    "will contribute no trials.")
+        else:
+            self.total_note.setText(
+                f"{len(selected)} trial types selected, {total} trials total"
+                + ("" if self.uniform.isChecked()
+                   else "  (total is the sum of the counts above)"))
+        self.changed.emit()
+
+    # ---- serialisation ----
+
     def to_dict(self) -> dict:
+        rows = list(self._rows())
+        counts = {lab: n for lab, inc, n in rows if inc}
+        total = (self.n_trials.value() if self.uniform.isChecked()
+                 else sum(counts.values()))
         return {
+            "enabled": self.enabled.isChecked(),
             "label": self.name.text().strip(),
             "kind": self.kind.currentText(),
-            "liquids": [s.strip() for s in self.liquids.text().split(",")
-                        if s.strip()],
-            "n_trials": self.n_trials.value(),
-            "trial_type_labels": [i.text() for i in self.types.selectedItems()],
+            "liquids": [x.strip() for x in self.liquids.text().split(",")
+                        if x.strip()],
+            "n_trials": max(0, total),
+            "trial_type_labels": [lab for lab, inc, _ in rows if inc],
+            "trial_type_counts": counts,
+            "uniform": self.uniform.isChecked(),
             "n_options": (None if self.n_options.currentIndex() == 0
                           else self.n_options.currentIndex() + 1),
             "uncued": self.uncued.isChecked(),
-            "cue": None if self.uncued.isChecked() else {
-                    "led": self.cue_on.isChecked(),
-                    "channel": "wbg"[self.cue_ch.currentIndex()],
-                    "duration_ms": self.cue_ms.value(),
-                    "pulsing": self.cue_pulse.isChecked(),
-                    "pulse_hz": self.cue_hz.value(),
-                    "brightness": self.cue_bright.value(),
-                    "tone": self.cue_tone.isChecked(),
-                    "tone_hz": self.cue_tone_hz.value(),
-                    "olf": self.cue_olf.isChecked(),
-                    "other": self.cue_other.isChecked()},
+            "cue": None if self.uncued.isChecked() else self.cue,
         }
 
     def from_dict(self, d: dict) -> None:
+        self.enabled.setChecked(d.get("enabled", True))
         self.name.setText(d.get("label", ""))
         self.kind.setCurrentText(d.get("kind", "single"))
         self.liquids.setText(", ".join(d.get("liquids", [])))
-        self.n_trials.setValue(d.get("n_trials", 100))
-        want = set(d.get("trial_type_labels", []))
-        for i in range(self.types.count()):
-            self.types.item(i).setSelected(self.types.item(i).text() in want)
-        self.uncued.setChecked(d.get("uncued", False))
+        self.n_trials.setValue(max(1, d.get("n_trials", 100)))
+        self.uniform.setChecked(d.get("uniform", True))
         idx = d.get("n_options")
         self.n_options.setCurrentIndex(0 if idx is None else max(0, idx - 1))
-        c = d.get("cue")
-        self.cue_on.setChecked(bool(c and c.get("led", True)))
-        if c:
-            self.cue_tone.setChecked(c.get("tone", False))
-            self.cue_olf.setChecked(c.get("olf", False))
-            self.cue_other.setChecked(c.get("other", False))
-            self.cue_tone_hz.setValue(c.get("tone_hz", 8000))
-            self.cue_ch.setCurrentIndex("wbg".index(c.get("channel", "w")[:1]))
-            self.cue_ms.setValue(c.get("duration_ms", 2000))
-            self.cue_pulse.setChecked(c.get("pulsing", False))
-            self.cue_hz.setValue(c.get("pulse_hz", 10))
-            self.cue_bright.setValue(c.get("brightness", 255))
+        self.uncued.setChecked(d.get("uncued", False))
+        cue = d.get("cue")
+        if isinstance(cue, CueSet):
+            self.cue = cue
+            self.b_cue.setText(describe_cue(cue))
+
+        want = set(d.get("trial_type_labels", []))
+        counts = d.get("trial_type_counts", {})
+        self.types.blockSignals(True)
+        for r in range(self.types.rowCount()):
+            lab = self.types.item(r, 1).text()
+            self.types.item(r, 0).setCheckState(
+                Qt.CheckState.Checked if lab in want else Qt.CheckState.Unchecked)
+            self.types.item(r, 2).setText(str(counts.get(lab, 0)))
+        self.types.blockSignals(False)
+        self._uniform_changed()
 
 
 # =====================================================================
@@ -433,11 +538,11 @@ class SetupTab(QWidget):
         outer.addWidget(scroll, 1)
 
         # ---- liquids ----
-        g = QGroupBox("Liquids")
+        g = QGroupBox("Reinforcers")
         f = QFormLayout(g)
         self.liquids = QLineEdit("alcohol, water")
         self.liquids.textChanged.connect(self._liquids_changed)
-        f.addRow("Names, separated by commas", self.liquids)
+        f.addRow("Reinforcer identifiers (comma separated)", self.liquids)
         f.addRow(QLabel("<i>These names appear wherever a liquid is chosen. "
                         "Commas separate names, so a name cannot contain "
                         "one.</i>"))
@@ -490,17 +595,37 @@ class SetupTab(QWidget):
         lay.addWidget(g)
 
         # ---- blocks ----
-        g = QGroupBox("Blocks")
+        g = QGroupBox("Block definitions")
         self.block_box = QVBoxLayout(g)
         self.blocks: list[BlockEditor] = []
         row = QHBoxLayout()
-        b_add = QPushButton("Add block"); b_add.clicked.connect(lambda: self._add_block())
-        row.addWidget(b_add); row.addStretch()
+        b_add = QPushButton("Add block definition")
+        b_add.clicked.connect(lambda: self._add_block())
+        row.addWidget(b_add)
+        row.addStretch()
+        row.addWidget(QLabel(
+            "<i>Definitions are retained whether or not they are included "
+            "in the experiment.</i>"))
         self.block_box.addLayout(row)
         lay.addWidget(g)
 
+        # ---- experiment composition ----
+        g = QGroupBox("Experiment composition")
+        v = QVBoxLayout(g)
+        v.addWidget(QLabel(
+            "Blocks included in the experiment, in the order defined "
+            "above. Block presentation order is redrawn independently at "
+            "each reinforcement-schedule level unless order randomisation "
+            "is disabled."))
+        self.exp_summary = QPlainTextEdit()
+        self.exp_summary.setReadOnly(True)
+        self.exp_summary.setFont(_mono(9))
+        self.exp_summary.setMinimumHeight(160)
+        v.addWidget(self.exp_summary)
+        lay.addWidget(g)
+
         # ---- timing ----
-        g = QGroupBox("Timing")
+        g = QGroupBox("Temporal parameters")
         f = QFormLayout(g)
         self.cue_reward = QSpinBox(); self.cue_reward.setRange(0, 60000); self.cue_reward.setValue(1000)
         self.omission = QSpinBox(); self.omission.setRange(0, 120000); self.omission.setValue(5000)
@@ -509,21 +634,23 @@ class SetupTab(QWidget):
         self.iti_mean = QDoubleSpinBox(); self.iti_mean.setRange(0.1, 600); self.iti_mean.setValue(8.0)
         self.iti_min = QDoubleSpinBox(); self.iti_min.setRange(0.0, 600); self.iti_min.setValue(3.0)
         self.iti_max = QDoubleSpinBox(); self.iti_max.setRange(0.1, 600); self.iti_max.setValue(30.0)
-        f.addRow("Cue to reward, ms", self.cue_reward)
-        f.addRow("Give up after, ms", self.omission)
-        f.addRow("Wait before retracting, ms", self.retract_delay)
-        f.addRow("Quiet period before next trial, ms", self.gate)
-        f.addRow("Interval between trials \u2014 mean, s", self.iti_mean)
-        f.addRow("Shortest interval, s", self.iti_min)
-        f.addRow("Longest interval, s", self.iti_max)
+        f.addRow("Cue-to-reinforcer delay (ms)", self.cue_reward)
+        f.addRow("Response window / omission criterion (ms)", self.omission)
+        f.addRow("Post-reinforcement retraction delay (ms)", self.retract_delay)
+        f.addRow("Required lick-free interval before trial onset (ms)", self.gate)
+        f.addRow("Inter-trial interval: exponential scale (s)", self.iti_mean)
+        f.addRow("Inter-trial interval: lower bound (s)", self.iti_min)
+        f.addRow("Inter-trial interval: upper bound (s)", self.iti_max)
         f.addRow(QLabel(
-            "<i>Intervals are drawn from an exponential and cut off at the "
-            "longest value, so the mean you actually get is a little below "
-            "the one you ask for. The preview reports it.</i>"))
+            "<i>Inter-trial intervals are drawn from an exponential distribution "
+            "with the scale above, offset by the lower bound and truncated at "
+            "the upper bound. Truncation reduces the realised mean below "
+            "lower bound plus scale; the generated-session summary reports "
+            "the realised value, which is the one to cite.</i>"))
         lay.addWidget(g)
 
         # ---- operant ----
-        g = QGroupBox("How many licks earn a reward")
+        g = QGroupBox("Reinforcement schedule")
         f = QFormLayout(g)
         self.op_mode = QComboBox()
         self.op_mode.addItems(["none", "fixed", "variable", "progressive"])
@@ -532,32 +659,35 @@ class SetupTab(QWidget):
         self.op_fixed = QSpinBox(); self.op_fixed.setRange(1, 500); self.op_fixed.setValue(1)
         self.op_mean = QSpinBox(); self.op_mean.setRange(1, 500); self.op_mean.setValue(3)
         self.op_set = QLineEdit("1, 2, 4, 8")
-        f.addRow("Schedule", self.op_mode)
-        f.addRow("Fixed ratio", self.op_fixed)
-        f.addRow("Variable ratio, average", self.op_mean)
-        f.addRow("Progressive ratios", self.op_set)
+        f.addRow("Schedule type", self.op_mode)
+        f.addRow("Fixed ratio: responses per reinforcer", self.op_fixed)
+        f.addRow("Variable ratio: mean responses per reinforcer", self.op_mean)
+        f.addRow("Progressive ratio: response requirements", self.op_set)
         f.addRow(QLabel(
-            "<i>Progressive: trials divide evenly across the ratios, and "
-            "every block runs at each ratio before it advances.</i>"))
+            "<i>Under a progressive-ratio schedule the total trial count is "
+            "divided evenly among the listed response requirements. Every "
+            "block is presented at each requirement before the requirement "
+            "advances, so schedule level is not confounded with block "
+            "order.</i>"))
         lay.addWidget(g)
 
         # ---- behaviour toggles ----
-        g = QGroupBox("How a trial behaves")
+        g = QGroupBox("Trial structure")
         f = QFormLayout(g)
-        self.retraction = QCheckBox("Retract spouts during a trial")
+        self.retraction = QCheckBox("Withdraw spouts within the trial")
         self.retraction.setChecked(True)
         self.retraction.setToolTip(
             "Off leaves both spouts out for the whole trial. Suits "
             "habituation or free access, but it also removes what stops "
             "an animal sampling both spouts on a choice trial, so choice "
             "data from such a session means something different.")
-        self.rand_sides = QCheckBox("Move each liquid between spouts")
+        self.rand_sides = QCheckBox("Counterbalance reinforcer-to-spout assignment across trials")
         self.rand_sides.setChecked(True)
         self.rand_sides.setToolTip(
             "On, a liquid alternates sides under the balance and repeat "
             "limits below. Off pins each liquid to one spout, which lets "
             "side preference masquerade as liquid preference.")
-        self.purge_on = QCheckBox("Purge the line when a spout changes liquid")
+        self.purge_on = QCheckBox("Purge the delivery line when a spout's reinforcer changes")
         self.purge_on.setChecked(True)
         self.purge_on.setToolTip(
             "Without this the first lick after a switch delivers the "
@@ -581,13 +711,13 @@ class SetupTab(QWidget):
         lay.addWidget(g)
 
         # ---- random rewards ----
-        g = QGroupBox("Rewards that do not follow the cue")
+        g = QGroupBox("Cue-independent reinforcement")
         f = QFormLayout(g)
         f.addRow(QLabel(
             "<i>Three separate controls. They can be combined, and each is "
             "logged distinctly so they are never pooled in analysis.</i>"))
 
-        self.free_on = QCheckBox("Free rewards during the interval")
+        self.free_on = QCheckBox("Unsignalled reinforcement during the inter-trial interval")
         self.free_on.setToolTip(
             "Unsignalled drops at random times in the ITI. The standard "
             "control for whether the animal is working for the reward or "
@@ -600,48 +730,47 @@ class SetupTab(QWidget):
         self.free_max.setValue(1)
         f.addRow(self.free_on)
         r1 = QHBoxLayout()
-        for lab, w in (("Rate", self.free_rate), ("Amount", self.free_ul),
-                       ("Most per trial", self.free_max)):
+        for lab, w in (("Poisson rate", self.free_rate), ("Volume", self.free_ul),
+                       ("Maximum per interval", self.free_max)):
             r1.addWidget(QLabel(lab)); r1.addWidget(w)
         r1.addStretch()
         hold1 = QWidget(); hold1.setLayout(r1)
         f.addRow("", hold1)
 
-        self.uncued_on = QCheckBox("Some trials run with no cue")
+        self.uncued_on = QCheckBox("Unsignalled trials (stimulus omitted)")
         self.uncued_on.setToolTip(
             "The response requirement still applies. Asks whether the "
             "animal needs the cue at all.")
         self.uncued_pct = QDoubleSpinBox(); self.uncued_pct.setRange(0, 100)
         self.uncued_pct.setValue(10.0); self.uncued_pct.setSuffix(" %")
         f.addRow(self.uncued_on)
-        f.addRow("   of trials", self.uncued_pct)
+        f.addRow("   proportion of trials", self.uncued_pct)
 
-        self.decouple_on = QCheckBox("Some trials give a different amount "
-                                     "than the cue promised")
+        self.decouple_on = QCheckBox("Magnitude decoupled from the discriminative stimulus")
         self.decouple_on.setToolTip(
             "Breaks the cue-to-magnitude mapping on a fraction of trials, "
             "drawing from the other amounts that liquid uses.")
         self.decouple_pct = QDoubleSpinBox(); self.decouple_pct.setRange(0, 100)
         self.decouple_pct.setValue(10.0); self.decouple_pct.setSuffix(" %")
         f.addRow(self.decouple_on)
-        f.addRow("   of trials", self.decouple_pct)
+        f.addRow("   proportion of trials", self.decouple_pct)
         lay.addWidget(g)
 
         # ---- randomization ----
-        g = QGroupBox("Shuffling")
+        g = QGroupBox("Sequence randomisation")
         f = QFormLayout(g)
         self.max_repeat = QSpinBox(); self.max_repeat.setRange(1, 20); self.max_repeat.setValue(3)
         self.balance = QSpinBox(); self.balance.setRange(2, 200); self.balance.setValue(20)
-        self.rand_blocks = QCheckBox("Shuffle block order at each ratio")
+        self.rand_blocks = QCheckBox("Randomise block order at each schedule level")
         self.rand_blocks.setChecked(True)
         self.seed = QLineEdit(); self.seed.setPlaceholderText("leave empty to pick one at random")
-        f.addRow("Most repeats in a row", self.max_repeat)
-        f.addRow("Balance sides within every N trials", self.balance)
+        f.addRow("Maximum consecutive repetitions", self.max_repeat)
+        f.addRow("Counterbalancing window (trials)", self.balance)
         f.addRow("", self.rand_blocks)
-        f.addRow("Seed", self.seed)
+        f.addRow("Random seed (blank to generate)", self.seed)
         lay.addWidget(g)
         # ---- hardware sequence ----
-        g = QGroupBox("What the hardware will do, trial by trial")
+        g = QGroupBox("Trial event sequence")
         v = QVBoxLayout(g)
         v.addWidget(QLabel(
             "Generated from the same fields the runner uses, so this "
@@ -688,12 +817,16 @@ class SetupTab(QWidget):
     def _defaults(self) -> None:
         self._liquids_changed()
         for hz, ul in ((50, 1.0), (100, 3.0), (200, 6.0), (400, 10.0)):
-            self.tt.add_row({"label": f"alc_{hz}", "liquid": "alcohol",
-                             "tone_hz": 12000, "click_hz": hz,
-                             "volume_ul": ul, "use_tone": True})
-            self.tt.add_row({"label": f"wat_{hz}", "liquid": "water",
-                             "tone_hz": 5000, "click_hz": hz,
-                             "volume_ul": ul, "use_tone": True})
+            self.tt.add_row({
+                "label": f"alc_{hz}", "liquid": "alcohol", "volume_ul": ul,
+                "cue": CueSet(speaker=SpeakerCue(
+                    duration_ms=500, tone_hz=12000, click_train=True,
+                    click_hz=hz, volume=50))})
+            self.tt.add_row({
+                "label": f"wat_{hz}", "liquid": "water", "volume_ul": ul,
+                "cue": CueSet(speaker=SpeakerCue(
+                    duration_ms=500, tone_hz=5000, click_train=True,
+                    click_hz=hz, volume=50))})
         for i, (name, kind, liqs, ch) in enumerate([
                 ("alcohol_only", "single", "alcohol", "w"),
                 ("water_only", "single", "water", "b"),
@@ -702,12 +835,19 @@ class SetupTab(QWidget):
             b.name.setText(name)
             b.kind.setCurrentText(kind)
             b.liquids.setText(liqs)
-            b.cue_ch.setCurrentIndex("wbg".index(ch))
+            b.cue = CueSet(led=LedCue(channel=ch, duration_ms=2000,
+                                      brightness=255))
+            b.b_cue.setText(describe_cue(b.cue))
             want = ("alc" if liqs == "alcohol" else
                     "wat" if liqs == "water" else "")
-            for j in range(b.types.count()):
-                t = b.types.item(j).text()
-                b.types.item(j).setSelected(t.startswith(want) if want else True)
+            b.types.blockSignals(True)
+            for j in range(b.types.rowCount()):
+                t = b.types.item(j, 1).text()
+                on = t.startswith(want) if want else True
+                b.types.item(j, 0).setCheckState(
+                    Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+            b.types.blockSignals(False)
+            b._recount()
         for liq, sp in (("water", "l"), ("alcohol", "l"),
                         ("water", "r"), ("alcohol", "r")):
             self.add_solenoid(liq, sp, True)
@@ -717,11 +857,12 @@ class SetupTab(QWidget):
     def add_solenoid(self, liquid: str = "", spout: str = "l",
                      present: bool = True) -> None:
         r = self.sol_table.rowCount()
-        if r >= 8:
+        if r >= 16:
             QMessageBox.information(
-                self, "Eight is the limit",
-                "The firmware drives eight gates. More would need more "
-                "pins and a change to SOL_COUNT_MAX.")
+                self, "Channel limit reached",
+                "The controller is configured for 16 solenoid channels. "
+                "Raising this requires assigning further digital output "
+                "pins in the controller configuration.")
             return
         self.sol_table.insertRow(r)
         it = QTableWidgetItem(str(r + 1))
@@ -770,72 +911,88 @@ class SetupTab(QWidget):
         labels = self.tt.labels()
         for b in self.blocks:
             b.refresh_types(labels)
+        vols = self.calibration.known_volumes()
+        if vols:
+            self.tt.set_volumes(vols)
+        self._refresh_experiment()
 
     def _add_block(self) -> BlockEditor:
         b = BlockEditor(len(self.blocks))
         b.remove_requested.connect(self._remove_block)
+        b.move_requested.connect(self._move_block)
+        b.changed.connect(self._refresh_experiment)
         b.refresh_types(self.tt.labels())
         self.blocks.append(b)
         self.block_box.insertWidget(self.block_box.count() - 1, b)
+        self._refresh_experiment()
         return b
 
     def _remove_block(self, b: BlockEditor) -> None:
         self.blocks.remove(b)
         b.setParent(None)
+        self._relabel_blocks()
+        self._refresh_experiment()
+
+    def _move_block(self, b: BlockEditor, delta: int) -> None:
+        i = self.blocks.index(b)
+        j = i + delta
+        if not (0 <= j < len(self.blocks)):
+            return
+        self.blocks[i], self.blocks[j] = self.blocks[j], self.blocks[i]
+        for w in self.blocks:
+            self.block_box.removeWidget(w)
+        for k, w in enumerate(self.blocks):
+            self.block_box.insertWidget(k + 1, w)
+        self._relabel_blocks()
+        self._refresh_experiment()
+
+    def _relabel_blocks(self) -> None:
+        for i, b in enumerate(self.blocks):
+            b.setTitle(f"Block {i + 1}")
+
+    def _refresh_experiment(self) -> None:
+        """Summarise which blocks contribute to the generated session."""
+        if not hasattr(self, "exp_summary"):
+            return
+        lines, total = [], 0
+        for i, b in enumerate(self.blocks):
+            d = b.to_dict()
+            mark = "included" if d["enabled"] and d["n_trials"] > 0 else "excluded"
+            if mark == "included":
+                total += d["n_trials"]
+            comp = ", ".join(f"{k}\u00d7{v}" for k, v
+                             in sorted(d["trial_type_counts"].items()) if v)
+            lines.append(
+                f"{i + 1}. {d['label'] or '(unnamed)':<18} {mark:<9} "
+                f"{d['kind']:<7} {d['n_trials']:>5} trials   {comp}")
+        lines.append("")
+        lines.append(f"Total trials in the experiment: {total}")
+        self.exp_summary.setPlainText("\n".join(lines))
 
     # ---- config assembly ----
 
     def to_config(self) -> SessionConfig:
         types = []
         for d in self.tt.to_dicts():
-            cs = CueSet()
-            if d["use_tone"]:
-                cs.speaker = SpeakerCue(
-                    duration_ms=d["duration_ms"], tone_hz=d["tone_hz"],
-                    click_train=d["click_train"], click_hz=d["click_hz"],
-                    volume=d["loudness"])
-            if d["use_led"]:
-                cs.led = LedCue(channel=d["led_channel"],
-                                duration_ms=d["duration_ms"])
-            if d["use_olf"]:
-                cs.olfactory = OlfactoryCue(duration_ms=d["duration_ms"])
-            if d["use_other"]:
-                cs.other = OtherCue(name=self.other_name.text().strip() or "other",
-                                    duration_ms=d["duration_ms"],
-                                    raw_command=self.other_cmd.text().strip())
             types.append(TrialType(
-                label=d["label"], liquid=d["liquid"], cue=cs,
+                label=d["label"], liquid=d["liquid"], cue=d["cue"],
                 volume_ul=d["volume_ul"],
                 reward_contingency_pct=d["reward_contingency_pct"]))
 
         blocks = []
         for b in self.blocks:
             d = b.to_dict()
-            c = d["cue"] or {}
-            cue = CueSet()
-            if c.get("led"):
-                cue.led = LedCue(channel=c["channel"],
-                                 duration_ms=c["duration_ms"],
-                                 pulsing=c["pulsing"], pulse_hz=c["pulse_hz"],
-                                 brightness=c["brightness"])
-            if c.get("tone"):
-                cue.speaker = SpeakerCue(duration_ms=c["duration_ms"],
-                                         tone_hz=c.get("tone_hz", 8000),
-                                         click_train=False)
-            if c.get("olf"):
-                cue.olfactory = OlfactoryCue(duration_ms=c["duration_ms"])
-            if c.get("other"):
-                cue.other = OtherCue(
-                    name=self.other_name.text().strip() or "other",
-                    duration_ms=c["duration_ms"],
-                    raw_command=self.other_cmd.text().strip())
-            if cue.is_empty():
+            if not d["enabled"] or d["n_trials"] <= 0:
+                continue
+            cue = d["cue"]
+            if cue is not None and cue.is_empty():
                 cue = None
             blocks.append(BlockSpec(
                 label=d["label"], kind=d["kind"], liquids=d["liquids"],
                 n_trials=d["n_trials"],
                 trial_type_labels=d["trial_type_labels"], cue=cue,
-                n_options=d.get("n_options")))
+                n_options=d.get("n_options"),
+                trial_type_counts=d.get("trial_type_counts") or None))
 
         sol_map, active = {}, set()
         for i, (on, liquid, spout) in enumerate(self.sol_widgets):
@@ -997,7 +1154,7 @@ class SetupTab(QWidget):
 
         while self.sol_widgets:
             self.remove_solenoid()
-        for row in d.get("solenoids", [])[:8]:
+        for row in d.get("solenoids", [])[:16]:
             self.add_solenoid(row.get("liquid", ""), row.get("spout", "l"),
                               row.get("active", True))
 

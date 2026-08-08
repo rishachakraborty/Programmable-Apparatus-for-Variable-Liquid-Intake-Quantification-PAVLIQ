@@ -43,7 +43,7 @@ from typing import Callable, Optional, Sequence
 import serial
 from serial.tools import list_ports
 
-FIRMWARE_EXPECTED = "0.7.0"
+FIRMWARE_EXPECTED = "0.9.1"
 FW_NAME_HINT = "MouseTaskFirmware"
 DEFAULT_BAUD = 115200
 
@@ -178,6 +178,7 @@ class BlockSwitchStatus:
     sequential: bool
     cycles: int
     do_return: bool
+    use_pump: bool = True
 
 
 BLOCK_OUTCOME_NAMES = {0: "none", 1: "ok", 2: "aborted"}
@@ -830,7 +831,7 @@ class ArduinoLink:
                               nl_per_ms=int(f[4]), is_open=f[5] == "1",
                               present=(f[6] == "1") if len(f) > 6 else True)
 
-    N_SOLENOIDS = 8
+    N_SOLENOIDS = 16
 
     def solenoid_get_all(self) -> list[SolenoidStatus]:
         rows = self.send("SOLGET,0", expect_ack=False, reply_key="SOL",
@@ -1127,7 +1128,8 @@ class ArduinoLink:
                      vac_sps: int = 400, pre_ms: int = 250,
                      vac_dwell_ms: int = 500, fill_dwell_ms: int = 500,
                      post_ms: int = 250, sequential: bool = True,
-                     cycles: int = 2, do_return: bool = False) -> None:
+                     cycles: int = 2, do_return: bool = False,
+                     use_pump: bool = True, gap_ms: int = 150) -> None:
         """
         Purge and refill the spout dead space.
 
@@ -1143,11 +1145,12 @@ class ArduinoLink:
         for s in spouts:
             self.send(f"BSSPOUT,{s['ch']},{int(s['solenoid'])},"
                       f"{int(s['fill_ms'])},{int(s.get('pulses', 3))},"
-                      f"{int(s.get('gap_ms', 150))}")
+                      f"{int(s.get('gap_ms', gap_ms))}")
         self.send(f"BSVAC,{int(vac_steps)},{int(vac_sps)}")
         self.send(f"BSTIME,{int(pre_ms)},{int(vac_dwell_ms)},"
                   f"{int(fill_dwell_ms)},{int(post_ms)}")
         self.send(f"BSMODE,{1 if sequential else 0}")
+        self.send(f"BSPUMP,{1 if use_pump else 0}")
         self.send(f"BSCYCLES,{int(cycles)}")
         self.send(f"BSRETURN,{1 if do_return else 0}")
         self.send("BSGO")
@@ -1162,8 +1165,10 @@ class ArduinoLink:
             spout=f[4], outcome=int(f[5]), vac_steps=int(f[6]),
             vac_sps=int(f[7]), pre_ms=int(f[8]), vac_dwell_ms=int(f[9]),
             fill_dwell_ms=int(f[10]), post_ms=int(f[11]),
-            sequential=f[12] == "1", cycles=int(f[13]),
-            do_return=f[14] == "1")
+            sequential=f[12] == "1",
+            use_pump=(f[13] == "1") if len(f) > 15 else True,
+            cycles=int(f[14] if len(f) > 15 else f[13]),
+            do_return=(f[15] if len(f) > 15 else f[14]) == "1")
 
     # ---------------- readiness ----------------
 

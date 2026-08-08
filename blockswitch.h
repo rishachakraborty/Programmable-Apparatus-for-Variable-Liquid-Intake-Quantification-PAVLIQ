@@ -74,6 +74,11 @@ bool blockSetVac(uint32_t steps, uint16_t stepsPerSec);
 bool blockSetTiming(uint32_t preMs, uint32_t vacDwellMs,
                     uint32_t fillDwellMs, uint32_t postMs);
 bool blockSetMode(uint8_t sequential);   // 0 parallel, 1 one at a time
+
+// Whether the syringe pump participates. With aspiration disabled the
+// line is cleared by dispensing the new reinforcer through it in the
+// retracted position, which needs no pump but discards more liquid.
+bool blockSetUseStepper(bool use);
 bool blockSetCycles(uint8_t n);
 bool blockSetReturn(bool on);
 bool blockStart();

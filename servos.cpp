@@ -46,6 +46,46 @@ struct ServoState {
 
 static ServoState g_sv[SV_COUNT];
 
+// Deadline until which the idle release is suppressed on every channel.
+//
+// A de-energised servo must be re-energised and allowed to settle before
+// it can move, which would add a variable delay to any withdrawal
+// commanded in the interim. That matters only during the interval in
+// which a withdrawal can actually be triggered by the subject's
+// behaviour - from stimulus onset until the response is resolved.
+// Outside that interval the normal idle release applies, so the holding
+// current is present for the response window rather than for the whole
+// trial. This distinction is significant when trials are long: holding
+// throughout would keep the motors energised, and warm, for the
+// consumption, retraction and inter-trial phases, during which no
+// latency-critical movement occurs.
+static uint32_t g_holdUntilMs = 0;
+static bool     g_holdActive  = false;
+
+void servoHoldUntil(uint32_t deadlineMs) {
+  g_holdUntilMs = deadlineMs;
+  g_holdActive  = true;
+}
+
+void servoHoldRelease() {
+  g_holdActive = false;
+  // The idle timers restart now, so channels release after their normal
+  // interval rather than immediately.
+  uint32_t now = millis();
+  for (uint8_t k = 0; k < SV_COUNT; k++) g_sv[k].idleSinceMs = now;
+}
+
+bool servoHoldActive() {
+  if (!g_holdActive) return false;
+  // Expire on the deadline as well as on explicit release, so a trial
+  // that ends abnormally cannot leave the motors energised indefinitely.
+  if ((int32_t)(millis() - g_holdUntilMs) >= 0) {
+    servoHoldRelease();
+    return false;
+  }
+  return true;
+}
+
 static const char* const SV_NAMES[SV_COUNT] = {"L", "C", "R"};
 
 const char* servoChName(uint8_t ch) {
@@ -447,6 +487,9 @@ void servoReport(uint8_t ch) {
 
 void servoUpdate() {
   uint32_t now = millis();
+  // Evaluated once per pass rather than per channel: the deadline check
+  // can release the hold, and every channel must see the same answer.
+  const bool holding = servoHoldActive();
 
   for (uint8_t k = 0; k < SV_COUNT; k++) {
     ServoState& S = g_sv[k];
@@ -457,7 +500,7 @@ void servoUpdate() {
     // does forever. Off by default because a detached actuator can
     // drift under gravity - enable it per channel once you know
     // your linkage holds.
-    if (!S.moving && S.attached && S.idleDetachMs > 0 &&
+    if (!holding && !S.moving && S.attached && S.idleDetachMs > 0 &&
         (now - S.idleSinceMs) >= S.idleDetachMs) {
       S.dev.detach();
       S.attached = false;

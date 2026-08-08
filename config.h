@@ -12,7 +12,7 @@
 // =============================================================
 
 #define FW_NAME    "MouseTaskFirmware"
-#define FW_VERSION "0.7.0"
+#define FW_VERSION "0.9.1"
 
 static const uint32_t SERIAL_BAUD = 115200;
 
@@ -20,16 +20,26 @@ static const uint32_t SERIAL_BAUD = 115200;
 // Digital on/off only. Pins 9/10 are Timer2 PWM pins and 11/12 are
 // Timer1 PWM pins, but we never analogWrite them, so both timers
 // stay free for other use (Timer2 = LED software PWM).
-// Eight gates rather than four. Nothing about the task requires four,
-// and a rig with three spouts and two liquids each needs six. Unwired
-// channels are marked absent (SOLPRESENT) and refuse to open, so the
-// extra capacity costs nothing on a rig that only uses four.
-static const uint8_t PIN_SOL[8] = {12, 11, 10, 9, 35, 36, 37, 38};
+// Solenoid channel count.
+//
+// The upper bound is physical, not a design limit: each gate needs one
+// digital output pin, and the controller has a finite number of them.
+// The value below can be raised to any number of free pins by extending
+// both arrays. Unwired channels are marked absent and refuse to open,
+// so declaring more channels than are populated costs only RAM.
+//
+// Pins already committed elsewhere: 2-6 (stimuli), 22-34 (actuators),
+// 44-46 (reserved by the servo timer), A13-A15 (analogue inputs).
+#define N_SOLENOIDS 16
 
-// Which channels actually have a driver attached at boot. Overridable
-// at runtime from the GUI.
-static const bool SOL_PRESENT_DEFAULT[8] =
-    {true, true, true, true, false, false, false, false};
+static const uint8_t PIN_SOL[N_SOLENOIDS] = {
+    12, 11, 10,  9, 35, 36, 37, 38,
+    39, 40, 41, 42, 43, 47, 48, 49};
+
+// Channels populated at boot. Adjustable at runtime.
+static const bool SOL_PRESENT_DEFAULT[N_SOLENOIDS] = {
+    true,  true,  true,  true,  false, false, false, false,
+    false, false, false, false, false, false, false, false};
 
 // ----------------------- SPEAKERS ----------------------------
 // Pin 6 = OC4A -> Timer4  (LEFT speaker)
@@ -179,6 +189,11 @@ static const uint16_t SERVO_US_MAX         = 2400;
 // 0 = never auto-detach.
 static const uint32_t SERVO_IDLE_DETACH_MS = 500;
 
+// Response-window duration above which the operator is advised that the
+// actuators will be energised for an extended interval on every trial.
+// Advisory only; nothing is refused.
+static const uint32_t SERVO_HOLD_WARN_MS = 20000UL;
+
 // ----------------------- SYNCHRONISED CUES -------------------
 // A choice trial must start the alcohol tone and the water tone at
 // the same instant. Two separate commands cannot do that: they are
@@ -191,7 +206,7 @@ static const uint8_t ARM_MAX_SLOTS = 6;
 static const uint8_t ARM_SLOT_LEN  = 56;
 
 // ----------------------- SOLENOID LIMITS ---------------------
-static const uint8_t  SOL_COUNT_MAX        = 8;
+static const uint8_t  SOL_COUNT_MAX        = N_SOLENOIDS;
 static const uint32_t SOL_DISPENSE_MAX_MS  = 5000UL;   // per timed open
 // Manual flush watchdog. Short on purpose: this only ever runs with
 // someone standing at the rig, and an unnoticed open gate empties a
