@@ -26,6 +26,8 @@ from PyQt6.QtWidgets import (
 
 import theme
 from calibration import CalibrationSet
+from settings import HardwareSettings
+from stepper_cal import StepperCalibration
 from gui_experiment import InitTab, RunTab
 from gui_setup import ExampleTab, SetupTab
 
@@ -40,13 +42,20 @@ class MainWindow(QMainWindow):
         self.link = None
         # One calibration object shared by every tab: the setup page reads
         # it to convert volumes, the hardware page edits it.
-        self.calibration = CalibrationSet()
+        self.settings = HardwareSettings.load()
+        self.calibration = (CalibrationSet.from_json(self.settings.calibration)
+                            if self.settings.calibration else CalibrationSet())
+        self.stepper_cal = (
+            StepperCalibration.from_json(self.settings.stepper_calibration)
+            if self.settings.stepper_calibration else StepperCalibration())
 
         self.setup = SetupTab(calibration=self.calibration)
         self.example = ExampleTab()
         self.init = InitTab(get_config=lambda: (self.session.config
                                                 if self.session else None),
-                            calibration=self.calibration)
+                            calibration=self.calibration,
+                            settings=self.settings,
+                            stepper_calibration=self.stepper_cal)
         self.run = RunTab(get_link=lambda: self.link,
                           get_session=lambda: self.session,
                           get_calibration=lambda: self.calibration)
@@ -89,7 +98,11 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(theme.stylesheet())
-        QSettings("mouse_task", "gui").setValue("theme", mode)
+        try:
+            self.settings.theme = mode
+            self.settings.save()
+        except Exception:
+            pass
 
     def _on_link(self, link):
         self.link = link

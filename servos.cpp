@@ -41,6 +41,7 @@ struct ServoState {
   bool     posKnown;       // false until SVINIT has actually driven there
   int      extendAngle;    // dispense position, captured on the init page
   bool     extendSet;
+  bool     present;
 };
 
 static ServoState g_sv[SV_COUNT];
@@ -106,14 +107,32 @@ void servoBegin() {
     S.posKnown      = false;
     S.extendAngle   = S.zeroAngle;
     S.extendSet     = false;
+    S.present       = SERVO_PRESENT_DEFAULT[k];
   }
   // Deliberately NOT attached or driven here. Nothing moves until
   // the host or the debug menu explicitly calls SVINIT, so a reset
   // mid-experiment does not fling the spouts at the animal.
 }
 
+bool servoSetPresent(uint8_t ch, bool present) {
+  if (ch >= SV_COUNT) { emitErr(F("SERVO_BAD_CHANNEL")); return false; }
+  if (!present && g_sv[ch].attached) servoDetach(ch);
+  g_sv[ch].present = present;
+  return true;
+}
+
+bool servoPresent(uint8_t ch) {
+  return (ch < SV_COUNT) && g_sv[ch].present;
+}
+
 bool servoAttach(uint8_t ch) {
   if (ch >= SV_COUNT) { emitErr(F("SERVO_BAD_CHANNEL")); return false; }
+  if (!g_sv[ch].present) {
+    // A spout that is not on the rig must not be driven. Refusing here
+    // is what lets the readiness check skip it instead of demanding a
+    // calibration for hardware that does not exist.
+    emitErr(F("SERVO_NOT_PRESENT_ON_THIS_RIG")); return false;
+  }
   ServoState& S = g_sv[ch];
   if (!S.attached) {
     S.dev.attach(S.pin, SERVO_US_MIN, SERVO_US_MAX);
@@ -170,6 +189,7 @@ static bool startMove(uint8_t ch, float target, const char* tag) {
 
 bool servoInit(uint8_t ch) {
   if (ch >= SV_COUNT) { emitErr(F("SERVO_BAD_CHANNEL")); return false; }
+  if (!g_sv[ch].present) { emitErr(F("SERVO_NOT_PRESENT_ON_THIS_RIG")); return false; }
   ServoState& S = g_sv[ch];
   servoAttach(ch);
   // Zeroing is always permitted: it is the reference move, and the
@@ -181,7 +201,9 @@ bool servoInit(uint8_t ch) {
 
 bool servoInitAll() {
   bool ok = true;
-  for (uint8_t k = 0; k < SV_COUNT; k++) ok &= servoInit(k);
+  for (uint8_t k = 0; k < SV_COUNT; k++) {
+    if (g_sv[k].present) ok &= servoInit(k);
+  }
   return ok;
 }
 
@@ -417,7 +439,8 @@ void servoReport(uint8_t ch) {
   Serial.print(S.zeroAngle);       Serial.print(',');
   Serial.print(S.posKnown ? 1 : 0); Serial.print(',');
   Serial.print(S.extendAngle);     Serial.print(',');
-  Serial.println(S.extendSet ? 1 : 0);
+  Serial.print(S.extendSet ? 1 : 0); Serial.print(',');
+  Serial.println(S.present ? 1 : 0);
 }
 
 // ---------------------------------------------------------------

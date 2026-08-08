@@ -95,9 +95,12 @@ void printHelp() {
   emitInfo(F("    Raise minOff if one sustained contact fragments into"));
   emitInfo(F("    several licks. 25 is the default, 40 is still safe."));
   emitInfo(F("LKSET,<ch>,<onDelta>,<offDelta>[,<pol>]  manual override"));
-  emitInfo(F("--- solenoids: 1-4 ---"));
+  emitInfo(F("--- solenoids: 1-8, unwired ones marked absent ---"));
   emitInfo(F("SOLID,<n>,<liquid>,<l|c|r>  set identity (no commas in name)"));
   emitInfo(F("SOLGET,<n>                  0 or blank = report all"));
+  emitInfo(F("SOLPRESENT,<n>,<0|1>        is a driver wired here"));
+  emitInfo(F("SVPRESENT,<l|c|r>,<0|1>     does this spout exist"));
+  emitInfo(F("LKPRESENT,<l|c|r>,<0|1>     does this sensor exist"));
   emitInfo(F("SOLCAL,<n>,<nl_per_ms>      calibration, nanolitres per ms"));
   emitInfo(F("SOLOPEN,<n> / SOLCLOSE,<n>  manual flush"));
   emitInfo(F("SOLDISP,<n>,<ms>            timed dispense"));
@@ -371,6 +374,11 @@ void dispatchCommand(char* line) {
       if (servoSetIdleDetach(ch, (uint32_t)ms)) emitAck(F("SVIDLE"));
       return;
     }
+    if (eq(verb, "SVPRESENT")) {
+      if (a.n < 3) { emitErr(F("SVPRESENT_NEEDS_0_OR_1")); return; }
+      if (servoSetPresent(ch, a.i(2, 1) != 0)) { emitAck(F("SVPRESENT")); servoReport(ch); }
+      return;
+    }
     if (eq(verb, "SVEXT")) {
       if (a.n < 3) { emitErr(F("SVEXT_NEEDS_ANGLE")); return; }
       if (servoSetExtend(ch, (int)a.i(2, 0), a.i(3, 0) != 0)) {
@@ -554,6 +562,11 @@ void dispatchCommand(char* line) {
     if (eq(verb, "LKON"))  { lickSetEnabled(ch, true);  emitAck(F("LKON"));  return; }
     if (eq(verb, "LKOFF")) { lickSetEnabled(ch, false); emitAck(F("LKOFF")); return; }
     if (eq(verb, "LKRESET")) { lickResetCount(ch); emitAck(F("LKRESET")); return; }
+    if (eq(verb, "LKPRESENT")) {
+      if (a.n < 3) { emitErr(F("LKPRESENT_NEEDS_0_OR_1")); return; }
+      if (lickSetPresent(ch, a.i(2, 1) != 0)) { emitAck(F("LKPRESENT")); lickReport(ch); }
+      return;
+    }
     if (eq(verb, "LKSET")) {
       if (a.n < 4) { emitErr(F("LKSET_NEEDS_ONDELTA_OFFDELTA")); return; }
       if (lickSetThresholds(ch, (float)a.i(2, 0), (float)a.i(3, 0),
@@ -578,7 +591,7 @@ void dispatchCommand(char* line) {
     }
 
     long n = a.i(1, 0);
-    if (n < 1 || n > SOL_COUNT_MAX) { emitErr(F("SOL_BAD_INDEX_USE_1_TO_4")); return; }
+    if (n < 1 || n > SOL_COUNT_MAX) { emitErr(F("SOL_BAD_INDEX")); return; }
     uint8_t idx = (uint8_t)(n - 1);
 
     if (eq(verb, "SOLID")) {
@@ -592,6 +605,11 @@ void dispatchCommand(char* line) {
         emitAck(F("SOLID"));
         solReportIdentity(idx);
       }
+      return;
+    }
+    if (eq(verb, "SOLPRESENT")) {
+      if (a.n < 3) { emitErr(F("SOLPRESENT_NEEDS_0_OR_1")); return; }
+      if (solSetPresent(idx, a.i(2, 1) != 0)) { emitAck(F("SOLPRESENT")); solReportIdentity(idx); }
       return;
     }
     if (eq(verb, "SOLCAL")) {

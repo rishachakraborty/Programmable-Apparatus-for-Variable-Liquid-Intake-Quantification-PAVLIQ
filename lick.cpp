@@ -55,6 +55,7 @@ struct LickChan {
   uint32_t  refractoryUntilMs;
   uint32_t  count;
   int16_t   lastRaw;
+  bool      present;
 
   // calibration accumulators
   CalMode   cal;
@@ -123,6 +124,7 @@ void lickBegin() {
     C.lastRaw    = 0;
     C.cal        = CAL_NONE;
     C.refractoryUntilMs = 0;
+    C.present    = LICK_PRESENT_DEFAULT[k];
   }
 
   // Default Arduino ADC prescaler is 128 (125 kHz, ~112 us per read).
@@ -145,6 +147,9 @@ void lickBegin() {
 
 static bool startCal(uint8_t ch, CalMode mode, uint16_t ms) {
   if (!validCh(ch)) return false;
+  if (!g_lk[ch].present) {
+    emitErr(F("LICK_SENSOR_NOT_PRESENT_ON_THIS_RIG")); return false;
+  }
   if (ms == 0) ms = LICK_CAL_DEFAULT_MS;
 
   LickChan& C = g_lk[ch];
@@ -333,11 +338,23 @@ void lickReport(uint8_t ch) {
   Serial.print(C.calibrated ? 1 : 0); Serial.print(',');
   Serial.print(C.enabled ? 1 : 0);    Serial.print(',');
   Serial.print(C.count);              Serial.print(',');
-  Serial.println(C.lastRaw);
+  Serial.print(C.lastRaw);            Serial.print(',');
+  Serial.println(C.present ? 1 : 0);
 }
 
 void lickReportAll() {
   for (uint8_t k = 0; k < LICK_COUNT; k++) lickReport(k);
+}
+
+bool lickSetPresent(uint8_t ch, bool present) {
+  if (!validCh(ch)) return false;
+  g_lk[ch].present = present;
+  if (!present) { g_lk[ch].enabled = false; g_lk[ch].cal = CAL_NONE; }
+  return true;
+}
+
+bool lickPresent(uint8_t ch) {
+  return (ch < LICK_COUNT) && g_lk[ch].present;
 }
 
 bool lickIsCalibrated(uint8_t ch) {
@@ -490,6 +507,7 @@ void lickUpdate() {
   // analogRead (~52 us), which keeps click-train gating accurate.
   uint8_t ch = g_cursor;
   g_cursor = (g_cursor + 1) % LICK_COUNT;
+  if (!g_lk[ch].present) return;   // do not burn an ADC read on nothing
 
   int16_t raw = (int16_t)analogRead(g_lk[ch].pin);
   processSample(ch, raw, millis());

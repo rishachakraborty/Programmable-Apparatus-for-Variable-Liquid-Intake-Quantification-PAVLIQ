@@ -12,7 +12,7 @@
 // =============================================================
 
 #define FW_NAME    "MouseTaskFirmware"
-#define FW_VERSION "0.6.0"
+#define FW_VERSION "0.7.0"
 
 static const uint32_t SERIAL_BAUD = 115200;
 
@@ -20,10 +20,16 @@ static const uint32_t SERIAL_BAUD = 115200;
 // Digital on/off only. Pins 9/10 are Timer2 PWM pins and 11/12 are
 // Timer1 PWM pins, but we never analogWrite them, so both timers
 // stay free for other use (Timer2 = LED software PWM).
-static const uint8_t PIN_SOL1 = 12;
-static const uint8_t PIN_SOL2 = 11;
-static const uint8_t PIN_SOL3 = 10;
-static const uint8_t PIN_SOL4 = 7;
+// Eight gates rather than four. Nothing about the task requires four,
+// and a rig with three spouts and two liquids each needs six. Unwired
+// channels are marked absent (SOLPRESENT) and refuse to open, so the
+// extra capacity costs nothing on a rig that only uses four.
+static const uint8_t PIN_SOL[8] = {12, 11, 10, 9, 35, 36, 37, 38};
+
+// Which channels actually have a driver attached at boot. Overridable
+// at runtime from the GUI.
+static const bool SOL_PRESENT_DEFAULT[8] =
+    {true, true, true, true, false, false, false, false};
 
 // ----------------------- SPEAKERS ----------------------------
 // Pin 6 = OC4A -> Timer4  (LEFT speaker)
@@ -121,6 +127,13 @@ static const uint8_t PIN_SERVO_C = 22;
 static const uint8_t PIN_SERVO_R = 25;
 
 // Fully-retracted ("zero") angle for each linear actuator.
+// Which spouts exist on this rig. A two-spout preference task has no
+// centre spout, and being forced to calibrate one that is not there is
+// pure friction. An absent spout refuses motion and is skipped by the
+// readiness check. Overridable at runtime with SVPRESENT.
+static const bool SERVO_PRESENT_DEFAULT[3] = {true, false, true};
+static const bool LICK_PRESENT_DEFAULT[3]  = {true, false, true};
+
 static const int SERVO_ZERO_L = 120;
 // WARNING: 0 degrees maps to a 544 us pulse, which is at or beyond
 // the internal mechanical stop of many hobby servos - the servo jams
@@ -178,9 +191,12 @@ static const uint8_t ARM_MAX_SLOTS = 6;
 static const uint8_t ARM_SLOT_LEN  = 56;
 
 // ----------------------- SOLENOID LIMITS ---------------------
-static const uint8_t  SOL_COUNT_MAX        = 4;
+static const uint8_t  SOL_COUNT_MAX        = 8;
 static const uint32_t SOL_DISPENSE_MAX_MS  = 5000UL;   // per timed open
-static const uint32_t SOL_MANUAL_MAX_MS    = 60000UL;  // flush watchdog
+// Manual flush watchdog. Short on purpose: this only ever runs with
+// someone standing at the rig, and an unnoticed open gate empties a
+// reservoir into the apparatus.
+static const uint32_t SOL_MANUAL_MAX_MS    = 15000UL;
 static const uint8_t  SOL_LIQUID_NAME_LEN  = 16;
 
 // Solenoid switching injects a transient into the analog lickometer
@@ -208,9 +224,9 @@ static const uint16_t PULSE_FREQ_MAX_HZ   = 100;
 //  left speaker silent and the step pulses unreliable, and neither
 //  failure announces itself. These are plain digital pins on the
 //  Mega with no timer attached; change them here if the rig differs.
-#define PIN_STEP_L_STEP   51
-#define PIN_STEP_L_DIR    52
-#define PIN_STEP_L_EN     53      // active LOW (nENBL)
+#define PIN_STEP_L_STEP   26
+#define PIN_STEP_L_DIR    27
+#define PIN_STEP_L_EN     28      // active LOW (nENBL)
 
 #define PIN_STEP_R_STEP   29
 #define PIN_STEP_R_DIR    30
@@ -225,7 +241,7 @@ static const uint16_t PULSE_FREQ_MAX_HZ   = 100;
 
 #define STEPPER_L_PRESENT  true
 #define STEPPER_C_PRESENT  false
-#define STEPPER_R_PRESENT  false
+#define STEPPER_R_PRESENT  true
 
 // Bookkeeping only - nothing reads it - but it is what makes
 // STEPPER_NL_PER_STEP interpretable six months from now.

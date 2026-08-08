@@ -43,7 +43,7 @@ from typing import Callable, Optional, Sequence
 import serial
 from serial.tools import list_ports
 
-FIRMWARE_EXPECTED = "0.6.0"
+FIRMWARE_EXPECTED = "0.7.0"
 FW_NAME_HINT = "MouseTaskFirmware"
 DEFAULT_BAUD = 115200
 
@@ -99,6 +99,7 @@ class ServoStatus:
     pos_known: bool
     extend_angle: int
     extend_set: bool
+    present: bool = True
 
 
 @dataclass
@@ -113,6 +114,7 @@ class LickStatus:
     enabled: bool
     count: int
     last_raw: int
+    present: bool = True
 
     @property
     def snr(self) -> Optional[float]:
@@ -129,6 +131,7 @@ class SolenoidStatus:
     spout: str
     nl_per_ms: int
     is_open: bool
+    present: bool = True
 
     def ms_for_ul(self, microlitres: float) -> Optional[float]:
         if self.nl_per_ms <= 0:
@@ -743,7 +746,8 @@ class ArduinoLink:
                            soft_min=int(f[8]), soft_max=int(f[9]),
                            idle_detach_ms=int(f[10]), zero_angle=int(f[11]),
                            pos_known=f[12] == "1", extend_angle=int(f[13]),
-                           extend_set=f[14] == "1")
+                           extend_set=f[14] == "1",
+                           present=(f[15] == "1") if len(f) > 15 else True)
 
     def servo_write(self, ch: str, angle: int, force: bool = False) -> bool:
         """force also overrides the soft limits and the 10 degree minimum.
@@ -823,14 +827,28 @@ class ArduinoLink:
         f = self.send(f"SOLGET,{int(index)}", expect_ack=False,
                       reply_key="SOL")[0]
         return SolenoidStatus(index=int(f[1]), liquid=f[2], spout=f[3],
-                              nl_per_ms=int(f[4]), is_open=f[5] == "1")
+                              nl_per_ms=int(f[4]), is_open=f[5] == "1",
+                              present=(f[6] == "1") if len(f) > 6 else True)
+
+    N_SOLENOIDS = 8
 
     def solenoid_get_all(self) -> list[SolenoidStatus]:
         rows = self.send("SOLGET,0", expect_ack=False, reply_key="SOL",
-                         reply_count=4)
+                         reply_count=self.N_SOLENOIDS, timeout=3.0)
         return [SolenoidStatus(index=int(f[1]), liquid=f[2], spout=f[3],
-                               nl_per_ms=int(f[4]), is_open=f[5] == "1")
+                               nl_per_ms=int(f[4]), is_open=f[5] == "1",
+                               present=(f[6] == "1") if len(f) > 6 else True)
                 for f in rows]
+
+    def solenoid_set_present(self, index: int, present: bool) -> None:
+        self.send(f"SOLPRESENT,{int(index)},{1 if present else 0}",
+                  reply_key="SOL")
+
+    def servo_set_present(self, ch: str, present: bool) -> None:
+        self.send(f"SVPRESENT,{ch},{1 if present else 0}", reply_key="SERVO")
+
+    def lick_set_present(self, ch: str, present: bool) -> None:
+        self.send(f"LKPRESENT,{ch},{1 if present else 0}", reply_key="LICK")
 
     def solenoid_calibrate(self, index: int, nl_per_ms: int) -> None:
         """
@@ -872,7 +890,8 @@ class ArduinoLink:
                           on_delta=float(f[4]), off_delta=float(f[5]),
                           polarity=int(f[6]), calibrated=f[7] == "1",
                           enabled=f[8] == "1", count=int(f[9]),
-                          last_raw=int(f[10]))
+                          last_raw=int(f[10]),
+                          present=(f[11] == "1") if len(f) > 11 else True)
 
     def lick_stream_raw(self, ch: str, ms: int = 10000) -> bool:
         """Starts a raw ADC stream. Subscribe with add_raw_listener()."""
@@ -1158,6 +1177,10 @@ class ArduinoLink:
 
         for ch in spouts:
             sv = self.servo_read(ch)
+            if not sv.present:
+                # Not on this rig. Demanding a calibration for hardware
+                # that does not exist is the friction this flag removes.
+                continue
             if not sv.extend_set:
                 problems.append(f"Servo {ch.upper()}: extended position never set "
                                 f"(SVEXT). Trials will refuse to start.")
@@ -1171,7 +1194,10 @@ class ArduinoLink:
                     f"stop there and buzz.")
 
             lk = self.lick_read(ch)
-            if not lk.calibrated:
+            if not lk.present:
+                problems.append(f"Spout {ch.upper()} is in use but its lick "
+                                f"sensor is marked absent.")
+            elif not lk.calibrated:
                 problems.append(f"Lick sensor {ch.upper()}: not calibrated.")
             elif not lk.enabled:
                 warnings.append(f"Lick sensor {ch.upper()}: calibrated but disabled.")
@@ -1181,6 +1207,8 @@ class ArduinoLink:
                     f"{lk.snr:.1f}x baseline noise. Expect false licks.")
 
         for sol in self.solenoid_get_all():
+            if not sol.present:
+                continue
             if sol.spout == "NONE" or not sol.liquid or sol.liquid == "UNSET":
                 warnings.append(f"Solenoid {sol.index}: identity not set.")
             elif sol.nl_per_ms == 0:

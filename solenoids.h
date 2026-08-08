@@ -9,6 +9,12 @@ enum SolSpout : uint8_t { SPOUT_NONE = 0, SPOUT_L = 1, SPOUT_C = 2, SPOUT_R = 3 
 
 void solBegin();
 
+// Whether a driver is wired to this channel. Configuration is always
+// allowed; only opening requires presence, so an unwired gate cannot
+// silently report a delivery it never made.
+bool solSetPresent(uint8_t idx, bool present);
+bool solPresent(uint8_t idx);
+
 // ---- identity --------------------------------------------------
 // Each solenoid's identity is (liquid name, spout it feeds). The
 // Python task-setup page writes these; they persist in EEPROM so

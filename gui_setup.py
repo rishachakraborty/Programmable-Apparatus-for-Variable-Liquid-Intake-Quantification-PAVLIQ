@@ -32,8 +32,8 @@ from theme import c as tc
 from calibration import CalibrationSet
 from task_design import (
     BlockSpec, CueSet, LedCue, OlfactoryCue, OperantDesign, OtherCue,
-    SessionConfig, SpeakerCue, TrialType, audit_session, generate_session,
-    resolve_durations,
+    RandomRewardConfig, SessionConfig, SpeakerCue, TrialType, audit_session,
+    generate_session, resolve_durations,
 )
 
 # Colour comes from theme.py so light and dark stay consistent across
@@ -271,6 +271,20 @@ class BlockEditor(QGroupBox):
         grid.addWidget(self.kind, 0, 3)
         grid.addWidget(QLabel("Trials"), 0, 4)
         grid.addWidget(self.n_trials, 0, 5)
+
+        # How many options are offered at once. Auto uses as many as the
+        # selected trial types can fill on distinct spouts, so a third
+        # spout turns a two-choice block into three-way with no edit.
+        self.n_options = QComboBox()
+        self.n_options.addItems(["Auto", "2 at a time", "3 at a time",
+                                 "4 at a time"])
+        self.n_options.setMinimumWidth(150)
+        self.n_options.setToolTip(
+            "Two options cannot be offered at once if they come from the "
+            "same spout, so the trial types selected below must span at "
+            "least this many spouts.")
+        grid.addWidget(QLabel("Options"), 0, 6)
+        grid.addWidget(self.n_options, 0, 7)
         grid.addWidget(QLabel("Liquids"), 1, 0)
         grid.addWidget(self.liquids, 1, 1, 1, 5)
 
@@ -285,6 +299,12 @@ class BlockEditor(QGroupBox):
         cue_form = QHBoxLayout(cue_box)
         # A block is no more obliged to be an LED than a trial is obliged
         # to be a tone. Tick whatever combination the design calls for.
+        # Uncued switches matter for reversal designs: the contingency
+        # changes and the animal has to notice from the outcomes alone.
+        self.uncued = QCheckBox("No cue at all (uncued switch)")
+        self.uncued.setToolTip(
+            "For reversal learning, where the block change must not be "
+            "signalled. Everything else about the block is unchanged.")
         self.cue_on = QCheckBox("LED")
         self.cue_on.setChecked(True)
         self.cue_tone = QCheckBox("Tone")
@@ -299,7 +319,7 @@ class BlockEditor(QGroupBox):
         self.cue_pulse = QCheckBox("Pulsing")
         self.cue_hz = QSpinBox(); self.cue_hz.setRange(1, 100); self.cue_hz.setValue(10)
         self.cue_bright = QSpinBox(); self.cue_bright.setRange(0, 255); self.cue_bright.setValue(255)
-        for w in (self.cue_on, self.cue_ch, QLabel("ms"), self.cue_ms,
+        for w in (self.uncued, self.cue_on, self.cue_ch, QLabel("ms"), self.cue_ms,
                   self.cue_pulse, QLabel("Hz"), self.cue_hz,
                   QLabel("Bright"), self.cue_bright,
                   self.cue_tone, QLabel("tone Hz"), self.cue_tone_hz,
@@ -318,10 +338,19 @@ class BlockEditor(QGroupBox):
         for w in (self.n_trials, self.cue_ms, self.cue_hz, self.cue_bright):
             w.valueChanged.connect(self.changed)
         for w in (self.cue_on, self.cue_pulse, self.cue_tone, self.cue_olf,
-                  self.cue_other):
+                  self.cue_other, self.uncued):
             w.stateChanged.connect(self.changed)
+        self.uncued.stateChanged.connect(self._uncued_changed)
+        self.n_options.currentIndexChanged.connect(self.changed)
         self.cue_tone_hz.valueChanged.connect(self.changed)
         self.types.itemSelectionChanged.connect(self.changed)
+
+    def _uncued_changed(self):
+        on = not self.uncued.isChecked()
+        for w in (self.cue_on, self.cue_ch, self.cue_ms, self.cue_pulse,
+                  self.cue_hz, self.cue_bright, self.cue_tone,
+                  self.cue_tone_hz, self.cue_olf, self.cue_other):
+            w.setEnabled(on)
 
     def refresh_types(self, labels: list[str]) -> None:
         keep = {i.text() for i in self.types.selectedItems()}
@@ -342,7 +371,11 @@ class BlockEditor(QGroupBox):
                         if s.strip()],
             "n_trials": self.n_trials.value(),
             "trial_type_labels": [i.text() for i in self.types.selectedItems()],
-            "cue": {"led": self.cue_on.isChecked(),
+            "n_options": (None if self.n_options.currentIndex() == 0
+                          else self.n_options.currentIndex() + 1),
+            "uncued": self.uncued.isChecked(),
+            "cue": None if self.uncued.isChecked() else {
+                    "led": self.cue_on.isChecked(),
                     "channel": "wbg"[self.cue_ch.currentIndex()],
                     "duration_ms": self.cue_ms.value(),
                     "pulsing": self.cue_pulse.isChecked(),
@@ -362,6 +395,9 @@ class BlockEditor(QGroupBox):
         want = set(d.get("trial_type_labels", []))
         for i in range(self.types.count()):
             self.types.item(i).setSelected(self.types.item(i).text() in want)
+        self.uncued.setChecked(d.get("uncued", False))
+        idx = d.get("n_options")
+        self.n_options.setCurrentIndex(0 if idx is None else max(0, idx - 1))
         c = d.get("cue")
         self.cue_on.setChecked(bool(c and c.get("led", True)))
         if c:
@@ -411,39 +447,33 @@ class SetupTab(QWidget):
         g = QGroupBox("Solenoids")
         v = QVBoxLayout(g)
         v.addWidget(QLabel(
-            "Each solenoid gates one liquid to one spout. Calibration is "
-            "nanolitres per millisecond of open time \u2014 weigh the output "
-            "of twenty 1-second opens and divide."))
-        self.sol_table = QTableWidget(4, 5)
+            "What each gate carries and where it goes. Nothing about "
+            "calibration lives here — that is measured once on the "
+            "Hardware tab and applies wherever the solenoid is used."))
+        self.sol_table = QTableWidget(0, 4)
         self.sol_table.setHorizontalHeaderLabels(
-            ["Solenoid", "In use", "Liquid", "Goes to", "nL per ms"])
+            ["Solenoid", "In use", "Liquid", "Goes to"])
         self.sol_table.verticalHeader().setVisible(False)
         self.sol_table.horizontalHeader().setStretchLastSection(True)
         self.sol_table.verticalHeader().setDefaultSectionSize(32)
-        for i, w in enumerate((90, 70, 190, 150, 130)):
+        for i, w in enumerate((100, 80, 200, 160)):
             self.sol_table.setColumnWidth(i, w)
-        self.sol_widgets = []
-        for r in range(4):
-            it = QTableWidgetItem(str(r + 1))
-            it.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            self.sol_table.setItem(r, 0, it)
-            active = QCheckBox(); active.setChecked(r < 4)
-            liquid = QComboBox(); liquid.setEditable(True)
-            liquid.setMinimumWidth(150)
-            spout = QComboBox()
-            spout.addItems(["Left", "Center", "Right"])
-            spout.setMinimumWidth(140)
-            cal = QSpinBox(); cal.setRange(0, 1000000); cal.setValue(0)
-            self.sol_table.setCellWidget(r, 1, active)
-            self.sol_table.setCellWidget(r, 2, liquid)
-            self.sol_table.setCellWidget(r, 3, spout)
-            self.sol_table.setCellWidget(r, 4, cal)
-            self.sol_widgets.append((active, liquid, spout, cal))
-        self.sol_table.setMinimumHeight(190)
+        self.sol_table.setMinimumHeight(230)
+        self.sol_table.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                     QSizePolicy.Policy.Expanding)
+        self.sol_widgets: list = []
         v.addWidget(self.sol_table)
+
+        row = QHBoxLayout()
+        row.addWidget(_btn_local("Add solenoid", self.add_solenoid))
+        row.addWidget(_btn_local("Remove last", self.remove_solenoid))
+        row.addStretch()
+        row.addWidget(QLabel("<i>Up to 8. Untick In use for a gate that is "
+                             "not wired — it will refuse to open.</i>"))
+        v.addLayout(row)
         lay.addWidget(g)
 
-        # ---- trial types ----
+        # ---- trial types ----        # ---- trial types ----
         g = QGroupBox("Trial types")
         v = QVBoxLayout(g)
         v.addWidget(QLabel(
@@ -550,6 +580,53 @@ class SetupTab(QWidget):
             w.stateChanged.connect(self._preview_sequence)
         lay.addWidget(g)
 
+        # ---- random rewards ----
+        g = QGroupBox("Rewards that do not follow the cue")
+        f = QFormLayout(g)
+        f.addRow(QLabel(
+            "<i>Three separate controls. They can be combined, and each is "
+            "logged distinctly so they are never pooled in analysis.</i>"))
+
+        self.free_on = QCheckBox("Free rewards during the interval")
+        self.free_on.setToolTip(
+            "Unsignalled drops at random times in the ITI. The standard "
+            "control for whether the animal is working for the reward or "
+            "just consuming it.")
+        self.free_rate = QDoubleSpinBox(); self.free_rate.setRange(0.05, 60)
+        self.free_rate.setValue(1.0); self.free_rate.setSuffix(" per min")
+        self.free_ul = QDoubleSpinBox(); self.free_ul.setRange(0.1, 100)
+        self.free_ul.setValue(3.0); self.free_ul.setSuffix(" \u00b5L")
+        self.free_max = QSpinBox(); self.free_max.setRange(1, 10)
+        self.free_max.setValue(1)
+        f.addRow(self.free_on)
+        r1 = QHBoxLayout()
+        for lab, w in (("Rate", self.free_rate), ("Amount", self.free_ul),
+                       ("Most per trial", self.free_max)):
+            r1.addWidget(QLabel(lab)); r1.addWidget(w)
+        r1.addStretch()
+        hold1 = QWidget(); hold1.setLayout(r1)
+        f.addRow("", hold1)
+
+        self.uncued_on = QCheckBox("Some trials run with no cue")
+        self.uncued_on.setToolTip(
+            "The response requirement still applies. Asks whether the "
+            "animal needs the cue at all.")
+        self.uncued_pct = QDoubleSpinBox(); self.uncued_pct.setRange(0, 100)
+        self.uncued_pct.setValue(10.0); self.uncued_pct.setSuffix(" %")
+        f.addRow(self.uncued_on)
+        f.addRow("   of trials", self.uncued_pct)
+
+        self.decouple_on = QCheckBox("Some trials give a different amount "
+                                     "than the cue promised")
+        self.decouple_on.setToolTip(
+            "Breaks the cue-to-magnitude mapping on a fraction of trials, "
+            "drawing from the other amounts that liquid uses.")
+        self.decouple_pct = QDoubleSpinBox(); self.decouple_pct.setRange(0, 100)
+        self.decouple_pct.setValue(10.0); self.decouple_pct.setSuffix(" %")
+        f.addRow(self.decouple_on)
+        f.addRow("   of trials", self.decouple_pct)
+        lay.addWidget(g)
+
         # ---- randomization ----
         g = QGroupBox("Shuffling")
         f = QFormLayout(g)
@@ -631,12 +708,49 @@ class SetupTab(QWidget):
             for j in range(b.types.count()):
                 t = b.types.item(j).text()
                 b.types.item(j).setSelected(t.startswith(want) if want else True)
-        for r, (liq, sp) in enumerate([("water", "l"), ("alcohol", "l"),
-                                       ("water", "r"), ("alcohol", "r")]):
-            self.sol_widgets[r][1].setCurrentText(liq)
-            self.sol_widgets[r][2].setCurrentIndex("lcr".index(sp))
+        for liq, sp in (("water", "l"), ("alcohol", "l"),
+                        ("water", "r"), ("alcohol", "r")):
+            self.add_solenoid(liq, sp, True)
 
     # ---- wiring ----
+
+    def add_solenoid(self, liquid: str = "", spout: str = "l",
+                     present: bool = True) -> None:
+        r = self.sol_table.rowCount()
+        if r >= 8:
+            QMessageBox.information(
+                self, "Eight is the limit",
+                "The firmware drives eight gates. More would need more "
+                "pins and a change to SOL_COUNT_MAX.")
+            return
+        self.sol_table.insertRow(r)
+        it = QTableWidgetItem(str(r + 1))
+        it.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.sol_table.setItem(r, 0, it)
+
+        active = QCheckBox(); active.setChecked(present)
+        liq = QComboBox(); liq.setEditable(True); liq.setMinimumWidth(170)
+        liq.addItems(self._liquid_names())
+        if liquid:
+            liq.setCurrentText(liquid)
+        sp = QComboBox(); sp.addItems(["Left", "Center", "Right"])
+        sp.setMinimumWidth(150)
+        sp.setCurrentIndex("lcr".index(spout[:1]))
+        self.sol_table.setCellWidget(r, 1, active)
+        self.sol_table.setCellWidget(r, 2, liq)
+        self.sol_table.setCellWidget(r, 3, sp)
+        self.sol_widgets.append((active, liq, sp))
+        for w in (active,):
+            w.stateChanged.connect(self._preview_sequence)
+        liq.currentTextChanged.connect(self._preview_sequence)
+        sp.currentIndexChanged.connect(self._preview_sequence)
+
+    def remove_solenoid(self) -> None:
+        if not self.sol_widgets:
+            return
+        self.sol_table.removeRow(self.sol_table.rowCount() - 1)
+        self.sol_widgets.pop()
+        self._preview_sequence()
 
     def _liquid_names(self) -> list[str]:
         return [s.strip() for s in self.liquids.text().split(",") if s.strip()]
@@ -644,7 +758,7 @@ class SetupTab(QWidget):
     def _liquids_changed(self) -> None:
         names = self._liquid_names()
         self.tt.set_liquids(names)
-        for _, liquid, _, _ in self.sol_widgets:
+        for _, liquid, _ in self.sol_widgets:
             cur = liquid.currentText()
             liquid.blockSignals(True)
             liquid.clear(); liquid.addItems(names)
@@ -720,10 +834,11 @@ class SetupTab(QWidget):
             blocks.append(BlockSpec(
                 label=d["label"], kind=d["kind"], liquids=d["liquids"],
                 n_trials=d["n_trials"],
-                trial_type_labels=d["trial_type_labels"], cue=cue))
+                trial_type_labels=d["trial_type_labels"], cue=cue,
+                n_options=d.get("n_options")))
 
         sol_map, active = {}, set()
-        for i, (on, liquid, spout, _) in enumerate(self.sol_widgets):
+        for i, (on, liquid, spout) in enumerate(self.sol_widgets):
             if on.isChecked() and liquid.currentText().strip():
                 sp = "lcr"[spout.currentIndex()]
                 sol_map[(liquid.currentText().strip(), sp)] = i + 1
@@ -748,6 +863,15 @@ class SetupTab(QWidget):
             operant=OperantDesign(mode=mode, ratio=self.op_fixed.value(),
                                   mean_ratio=self.op_mean.value(),
                                   ratio_set=ratio_set),
+            random_reward=RandomRewardConfig(
+                free_enabled=self.free_on.isChecked(),
+                free_rate_per_min=self.free_rate.value(),
+                free_volume_ul=self.free_ul.value(),
+                free_max_per_trial=self.free_max.value(),
+                uncued_enabled=self.uncued_on.isChecked(),
+                uncued_pct=self.uncued_pct.value(),
+                decouple_enabled=self.decouple_on.isChecked(),
+                decouple_pct=self.decouple_pct.value()),
             randomize_block_order=self.rand_blocks.isChecked(),
             randomize_sides=self.rand_sides.isChecked(),
             use_retraction=self.retraction.isChecked(),
@@ -824,9 +948,8 @@ class SetupTab(QWidget):
         data = {
             "liquids": self.liquids.text(),
             "solenoids": [{"active": a.isChecked(), "liquid": l.currentText(),
-                           "spout": "lcr"[s.currentIndex()],
-                           "nl_per_ms": c.value()}
-                          for a, l, s, c in self.sol_widgets],
+                           "spout": "lcr"[s.currentIndex()]}
+                          for a, l, s in self.sol_widgets],
             "trial_types": self.tt.to_dicts(),
             "blocks": [b.to_dict() for b in self.blocks],
             "timing": {"cue_reward": self.cue_reward.value(),
@@ -845,6 +968,14 @@ class SetupTab(QWidget):
                           "purge": self.purge_on.isChecked(),
                           "other_name": self.other_name.text(),
                           "other_cmd": self.other_cmd.text()},
+            "random_reward": {"free": self.free_on.isChecked(),
+                              "rate": self.free_rate.value(),
+                              "ul": self.free_ul.value(),
+                              "max": self.free_max.value(),
+                              "uncued": self.uncued_on.isChecked(),
+                              "uncued_pct": self.uncued_pct.value(),
+                              "decouple": self.decouple_on.isChecked(),
+                              "decouple_pct": self.decouple_pct.value()},
             "shuffle": {"max_repeat": self.max_repeat.value(),
                         "balance": self.balance.value(),
                         "randomize_blocks": self.rand_blocks.isChecked(),
@@ -864,12 +995,11 @@ class SetupTab(QWidget):
         self.liquids.setText(d.get("liquids", ""))
         self._liquids_changed()
 
-        for r, s in enumerate(d.get("solenoids", [])[:4]):
-            a, l, sp, c = self.sol_widgets[r]
-            a.setChecked(s.get("active", True))
-            l.setCurrentText(s.get("liquid", ""))
-            sp.setCurrentIndex("lcr".index(s.get("spout", "l")[:1]))
-            c.setValue(int(s.get("nl_per_ms", 0)))
+        while self.sol_widgets:
+            self.remove_solenoid()
+        for row in d.get("solenoids", [])[:8]:
+            self.add_solenoid(row.get("liquid", ""), row.get("spout", "l"),
+                              row.get("active", True))
 
         while self.tt.rowCount():
             self.tt.removeRow(0)
@@ -904,6 +1034,16 @@ class SetupTab(QWidget):
         self.purge_on.setChecked(bh.get("purge", True))
         self.other_name.setText(bh.get("other_name", "other"))
         self.other_cmd.setText(bh.get("other_cmd", ""))
+
+        rr = d.get("random_reward", {})
+        self.free_on.setChecked(rr.get("free", False))
+        self.free_rate.setValue(rr.get("rate", 1.0))
+        self.free_ul.setValue(rr.get("ul", 3.0))
+        self.free_max.setValue(rr.get("max", 1))
+        self.uncued_on.setChecked(rr.get("uncued", False))
+        self.uncued_pct.setValue(rr.get("uncued_pct", 10.0))
+        self.decouple_on.setChecked(rr.get("decouple", False))
+        self.decouple_pct.setValue(rr.get("decouple_pct", 10.0))
 
         s = d.get("shuffle", {})
         self.max_repeat.setValue(s.get("max_repeat", 3))

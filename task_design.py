@@ -14,6 +14,7 @@ on the animal's behaviour. Storing the seed reproduces it exactly.
 from __future__ import annotations
 
 import json
+import itertools
 import math
 import random
 from dataclasses import dataclass, field, asdict
@@ -185,14 +186,26 @@ class TrialType:
 @dataclass
 class BlockSpec:
     """
-    kind == "single": one liquid, only that spout extended.
-    kind == "choice": two liquids, one per side, both extended.
+    kind == "single": one liquid at a time, only that spout extended.
+    kind == "choice": several options at once, one per spout.
+
+    Nothing here is limited to two. A choice block may draw on any number
+    of liquids; what constrains a trial is PHYSICAL, not numerical: two
+    options cannot be offered at once if they come out of the same spout.
+    With liquids 1 and 2 on the left and 3 and 4 on the right, a choice
+    block containing all four yields 1v3, 1v4, 2v3 and 2v4 - and if a
+    third spout is active, three-way trials as well.
     """
     label: str
     kind: str
     liquids: list[str]
     n_trials: int
     trial_type_labels: list[str]
+
+    # How many options are presented at once. None means "as many as the
+    # selected trial types can fill on distinct spouts", so a two-spout
+    # rig gives 2 and a three-spout rig gives 3 without editing anything.
+    n_options: Optional[int] = None
     # Fired once at block onset. Any combination of modalities - a block
     # is not obliged to be an LED any more than a trial is obliged to be
     # a tone.
@@ -204,8 +217,11 @@ class BlockSpec:
             p.append(f"{self.label}: kind must be 'single' or 'choice'.")
         if self.kind == "single" and len(self.liquids) != 1:
             p.append(f"{self.label}: a single block needs exactly one liquid.")
-        if self.kind == "choice" and len(self.liquids) != 2:
-            p.append(f"{self.label}: a choice block needs exactly two liquids.")
+        if self.kind == "choice" and len(self.liquids) < 2:
+            p.append(f"{self.label}: a choice block needs at least two "
+                     f"liquids.")
+        if self.n_options is not None and self.n_options < 2:
+            p.append(f"{self.label}: a choice offers at least two options.")
         if self.n_trials <= 0:
             p.append(f"{self.label}: n_trials must be positive.")
         if not self.trial_type_labels:
@@ -249,6 +265,54 @@ class OperantDesign:
     @property
     def n_levels(self) -> int:
         return len(self.ratio_set) if self.mode == "progressive" else 1
+
+
+@dataclass
+class RandomRewardConfig:
+    """
+    Three independent ways of decoupling reward from the cue. They can
+    be combined, and each is logged distinctly so the analysis can tell
+    them apart from an earned reward.
+
+    free_*        unsignalled rewards at Poisson-random times during the
+                  ITI. The standard control for "is the animal working
+                  for the reward or just consuming it".
+    uncued_pct    a fraction of trials run with NO cue at all; reward
+                  still follows the usual response requirement.
+    decouple_pct  a fraction of trials where the amount delivered is
+                  drawn at random from the other amounts, so the cue no
+                  longer predicts magnitude.
+    """
+    free_enabled: bool = False
+    free_rate_per_min: float = 1.0     # Poisson rate during the ITI
+    free_volume_ul: float = 3.0
+    free_spout: str = "any"            # "any", or a specific spout
+    free_max_per_trial: int = 1
+
+    uncued_enabled: bool = False
+    uncued_pct: float = 10.0
+
+    decouple_enabled: bool = False
+    decouple_pct: float = 10.0
+
+    def validate(self) -> list[str]:
+        p = []
+        if self.free_enabled:
+            if self.free_rate_per_min <= 0:
+                p.append("Free reward rate must be positive.")
+            if self.free_volume_ul <= 0:
+                p.append("Free reward volume must be positive.")
+        for name, on, pct in (("Uncued", self.uncued_enabled, self.uncued_pct),
+                              ("Decoupled", self.decouple_enabled,
+                               self.decouple_pct)):
+            if on and not (0.0 <= pct <= 100.0):
+                p.append(f"{name} trial percentage must be 0-100.")
+        return p
+
+    @property
+    def any_enabled(self) -> bool:
+        return (self.free_enabled or self.uncued_enabled
+                or self.decouple_enabled)
 
 
 @dataclass
@@ -296,11 +360,17 @@ class SessionConfig:
     purge_on_liquid_change: bool = True
     purge_vac_ul: float = 54.0        # aspirated per purge, per spout
     purge_fill_ul: float = 4.0        # dispensed per fill pulse
+    # Pulsing wets the tip and clears bubbles better than one long open,
+    # but a solenoid driven hard in a tight burst train gets hot. Set
+    # pulses to 1 and raise the volume for a single sustained pour.
     purge_pulses: int = 3
+    purge_gap_ms: int = 150           # rest between pulses, also cooling
     purge_cycles: int = 2
     purge_parallel: bool = True       # all spouts at once; needs a pump each
 
     operant: OperantDesign = field(default_factory=OperantDesign)
+    random_reward: RandomRewardConfig = field(
+        default_factory=RandomRewardConfig)
     randomize_block_order: bool = True
     seed: Optional[int] = None
 
@@ -324,6 +394,7 @@ class SessionConfig:
             p += b.validate(known)
 
         p += self.operant.validate()
+        p += self.random_reward.validate()
 
         if self.iti_min_s < 0:
             p.append("ITI minimum cannot be negative.")
@@ -367,6 +438,14 @@ class SessionConfig:
                             if t in by_label and by_label[t].liquid == liq]:
                         p.append(f"{b.label}: choice block has no trial type "
                                  f"for {liq!r}.")
+                combos = _choice_combinations(b, self, by_label)
+                if not combos:
+                    n = b.n_options or 2
+                    p.append(
+                        f"{b.label}: no valid {n}-way trial can be built. "
+                        f"Two options cannot be offered at once if they "
+                        f"come from the same spout, so the selected trial "
+                        f"types need to span at least {n} different spouts.")
 
         # Progressive ratio has to be able to divide the blocks.
         n_lv = self.operant.n_levels
@@ -417,6 +496,12 @@ class PlannedTrial:
     needs_purge: bool = False
     purge_spouts: list = field(default_factory=list)   # [(spout, solenoid)]
 
+    # Random reward markers, decided at planning time so they are in the
+    # saved session and reproduce from the seed.
+    uncued: bool = False              # run this trial with no cue at all
+    decoupled: bool = False           # amount does not match the cue
+    free_rewards: list = field(default_factory=list)   # [(t_s, spout, ul)]
+
     @property
     def trial_types(self) -> list[str]:
         return [s.trial_type for s in self.spouts]
@@ -454,9 +539,15 @@ class PlannedTrial:
         else:
             seq.append((None, "spouts already extended (retraction off)"))
 
-        cues = " + ".join(f"{s.spout.upper()} {s.cue.describe()}"
-                          for s in self.spouts)
-        seq.append((0, f"CUE together: {cues}"))
+        if self.uncued:
+            seq.append((0, "NO CUE (random-reward control): spouts are out "
+                           "and licks count, but nothing is signalled"))
+        else:
+            cues = " + ".join(f"{s.spout.upper()} {s.cue.describe()}"
+                              for s in self.spouts)
+            seq.append((0, f"CUE together: {cues}"))
+        if self.decoupled:
+            seq.append((0, "amount DECOUPLED from the cue on this trial"))
         seq.append((0, f"lick counting starts, {self.ratio} lick"
                        f"{'s' if self.ratio != 1 else ''} required"))
 
@@ -480,6 +571,9 @@ class PlannedTrial:
             seq.append((cfg.cue_reward_delay_ms + cfg.iti_retract_delay_ms,
                         "chosen spout retracts"))
         seq.append((None, f"ITI {self.iti_s:.1f} s"))
+        for t_s, sp, ul in self.free_rewards:
+            seq.append((None, f"  free reward at +{t_s:.1f} s into the ITI: "
+                              f"{ul:g} \u00b5L at {sp.upper()}"))
         seq.append((None, f"wait for {cfg.quiet_gate_ms} ms with no licking"))
         return seq
 
@@ -837,7 +931,8 @@ def _build_cue_registry(cfg: SessionConfig) -> dict:
         if b.cue is not None:
             reg[f"block_cue:{b.label}"] = n
             n += 1
-    for name in ("BLOCK_START", "BLOCK_VAC", "BLOCK_FILL",
+    for name in ("FREE_REWARD", "UNCUED_TRIAL", "DECOUPLED_TRIAL",
+                 "BLOCK_START", "BLOCK_VAC", "BLOCK_FILL",
                  "BLOCK_SPOUT_DONE", "BLOCK_RETURN", "BLOCK_END",
                  "STEP_ASP", "STEP_DIS", "STEP_DONE"):
         reg[f"event:{name}"] = n
@@ -893,10 +988,73 @@ def generate_session(cfg: SessionConfig) -> Session:
     for i, t in enumerate(trials):
         t.index = i
 
+    _apply_random_rewards(trials, cfg, rng)
     _mark_purges(trials, cfg)
 
     return Session(trials=trials, config=cfg, seed=seed,
                    cue_registry=_build_cue_registry(cfg))
+
+
+def _apply_random_rewards(trials, cfg, rng) -> None:
+    """
+    Decouple reward from cue in the three ways the config allows.
+
+    All decided here rather than at run time, so the plan in the log is
+    the plan that ran and the seed reproduces it exactly. Each kind is
+    flagged separately because they answer different questions and must
+    not be pooled during analysis.
+    """
+    rr = cfg.random_reward
+    if not rr.any_enabled or not trials:
+        return
+    n = len(trials)
+
+    # (b) Trials with no cue. The response requirement still applies, so
+    # this asks whether the animal needs the cue at all.
+    if rr.uncued_enabled and rr.uncued_pct > 0:
+        for t, flag in zip(trials, _exact_reward_flags(n, rr.uncued_pct, rng)):
+            t.uncued = flag
+
+    # (c) Cue says one amount, a different one arrives. Only meaningful
+    # where the block actually offers more than one amount, so the pool
+    # is drawn per liquid from the volumes in use.
+    if rr.decouple_enabled and rr.decouple_pct > 0:
+        pool: dict = {}
+        for t in trials:
+            for sp in t.spouts:
+                pool.setdefault(sp.liquid, set()).add(sp.volume_ul)
+        for t, flag in zip(trials,
+                           _exact_reward_flags(n, rr.decouple_pct, rng)):
+            if not flag:
+                continue
+            changed = False
+            for sp in t.spouts:
+                alts = sorted(pool.get(sp.liquid, set()) - {sp.volume_ul})
+                if alts:
+                    sp.volume_ul = rng.choice(alts)
+                    changed = True
+            t.decoupled = changed
+
+    # (a) Free rewards at Poisson times inside the ITI. Placed against
+    # the ITI actually drawn for each trial, so a long gap can carry more
+    # than a short one, which is what a constant rate means.
+    if rr.free_enabled and rr.free_rate_per_min > 0:
+        rate_s = rr.free_rate_per_min / 60.0
+        for t in trials:
+            spouts = [sp.spout for sp in t.spouts]
+            if rr.free_spout != "any":
+                spouts = [rr.free_spout] if rr.free_spout in spouts else []
+            if not spouts:
+                continue
+            time_s, drops = 0.0, []
+            while len(drops) < rr.free_max_per_trial:
+                gap = rng.expovariate(rate_s)
+                time_s += gap
+                if time_s >= t.iti_s:
+                    break
+                drops.append((round(time_s, 3), rng.choice(spouts),
+                              rr.free_volume_ul))
+            t.free_rewards = drops
 
 
 def _mark_purges(trials, cfg) -> None:
@@ -996,6 +1154,58 @@ def _sides_for(liquid: str, cfg: SessionConfig) -> list[str]:
     return [s for s in cfg.active_spouts if (liquid, s) in cfg.solenoid_map]
 
 
+def _assignments(labels, cfg, by_label) -> list:
+    """
+    Every way of putting these trial types on DISTINCT spouts.
+
+    This is the whole constraint, stated once: two options cannot be
+    presented simultaneously from the same spout, because there is only
+    one tube. Everything else about N-way choice falls out of it.
+
+    Small by construction - a handful of types across at most three
+    spouts - so exhaustive search is both fine and easy to verify.
+    Returns a list of {label: spout}.
+    """
+    options = [_sides_for(by_label[t].liquid, cfg) for t in labels]
+    if any(not o for o in options):
+        return []
+
+    out = []
+    for combo in itertools.product(*options):
+        if len(set(combo)) == len(combo):        # all distinct spouts
+            out.append(dict(zip(labels, combo)))
+    return out
+
+
+def _choice_combinations(block, cfg, by_label) -> list:
+    """
+    Valid option sets for a choice block, with their legal placements.
+
+    Returns [(labels_tuple, [assignment, ...]), ...]. A set of trial
+    types is only usable if at least one placement exists.
+    """
+    labels = [t for t in block.trial_type_labels if t in by_label]
+    if len(labels) < 2:
+        return []
+
+    n = block.n_options
+    if n is None:
+        # As many as the selected types can actually fill on distinct
+        # spouts. On a two-spout rig that is 2; add a third spout with a
+        # liquid on it and three-way trials appear with no edit here.
+        spouts = set()
+        for t in labels:
+            spouts.update(_sides_for(by_label[t].liquid, cfg))
+        n = max(2, min(len(spouts), len(labels)))
+
+    out = []
+    for combo in itertools.combinations(sorted(labels), n):
+        placements = _assignments(list(combo), cfg, by_label)
+        if placements:
+            out.append((combo, placements))
+    return out
+
+
 def _generate_single_block(block, n, level, block_pos, cfg, by_label, rng, carry):
     liquid = block.liquids[0]
     types = [t for t in block.trial_type_labels
@@ -1036,62 +1246,84 @@ def _generate_single_block(block, n, level, block_pos, cfg, by_label, rng, carry
     return out
 
 
-def _generate_choice_block(block, n, level, block_pos, cfg, by_label, rng, carry):
-    la, lb = block.liquids
-    types_a = [t for t in block.trial_type_labels if by_label[t].liquid == la]
-    types_b = [t for t in block.trial_type_labels if by_label[t].liquid == lb]
+def _generate_choice_block(block, n, level, block_pos, cfg, by_label, rng,
+                           carry):
+    """
+    Build a choice block of any arity.
 
-    # Every combination of an A-type with a B-type, used equally often.
-    pairs = [(a, b) for a in types_a for b in types_b]
-    counts = dict(zip(range(len(pairs)), _even_split(n, len(pairs), rng)))
-    pair_seq = _balanced_sequence(counts, n, cfg.balance_window,
-                                  cfg.max_repeat, rng)
+    Every valid option set is used equally often, and within each trial
+    the placement is drawn from the legal ones so a liquid moves between
+    spouts across trials. Nothing is hardcoded to two.
+    """
+    combos = _choice_combinations(block, cfg, by_label)
+    if not combos:
+        return []
 
-    sides_a = _sides_for(la, cfg)
-    sides_b = _sides_for(lb, cfg)
-    # Orientation: which side liquid A occupies. Balanced and run-limited,
-    # so the animal cannot solve the task by always going to one side.
-    orient_opts = [s for s in sides_a if any(o != s for o in sides_b)]
-    if not orient_opts:
-        orient_opts = sides_a
-    if cfg.randomize_sides and len(orient_opts) > 1:
-        orient_seq = _balanced_sequence(
-            dict(zip(orient_opts, _even_split(n, len(orient_opts), rng))),
-            n, cfg.balance_window, cfg.max_repeat, rng, carry.get("sides"))
-    else:
-        orient_seq = [orient_opts[0]] * n
+    counts = dict(zip(range(len(combos)), _even_split(n, len(combos), rng)))
+    combo_seq = _balanced_sequence(counts, n, cfg.balance_window,
+                                   cfg.max_repeat, rng)
 
-    seq_a = [pairs[p][0] for p in pair_seq]
-    seq_b = [pairs[p][1] for p in pair_seq]
-    flags_a = _reward_flags_by_type(seq_a, by_label, rng)
-    flags_b = _reward_flags_by_type(seq_b, by_label, rng)
+    # Reward flags are decided per trial type across the whole chunk, so
+    # each type hits its contingency exactly however it is paired.
+    per_type_positions: dict = {}
+    for i, ci in enumerate(combo_seq):
+        for lbl in combos[ci][0]:
+            per_type_positions.setdefault(lbl, []).append(i)
+    flags: dict = {}
+    for lbl, positions in per_type_positions.items():
+        pct = by_label[lbl].reward_contingency_pct
+        flags[lbl] = dict(zip(positions,
+                              _exact_reward_flags(len(positions), pct, rng)))
+
+    # Placement balancing: keep a per-liquid tally so a liquid does not
+    # settle on one spout by chance when several placements are legal.
+    tally: dict = {}
+    last_side: dict = {}
 
     out = []
     for i in range(n):
-        ta = by_label[seq_a[i]]
-        tb = by_label[seq_b[i]]
-        side_a = orient_seq[i]
-        others = [s for s in sides_b if s != side_a]
-        side_b = others[0] if others else sides_b[0]
-        ratio = _ratio_for(cfg.operant, level, rng)
+        labels, placements = combos[combo_seq[i]]
+
+        if cfg.randomize_sides and len(placements) > 1:
+            def cost(pl):
+                # Prefer placements that even out each liquid's history,
+                # and avoid repeating the previous trial's exact layout.
+                c = 0
+                for lbl, sp in pl.items():
+                    liq = by_label[lbl].liquid
+                    c += tally.get((liq, sp), 0)
+                    if last_side.get(liq) == sp:
+                        c += 1
+                return c
+            best = min(cost(p) for p in placements)
+            placement = rng.choice([p for p in placements if cost(p) == best])
+        else:
+            placement = placements[0]
+
+        spouts = []
+        for lbl in labels:
+            tt = by_label[lbl]
+            sp = placement[lbl]
+            tally[(tt.liquid, sp)] = tally.get((tt.liquid, sp), 0) + 1
+            last_side[tt.liquid] = sp
+            spouts.append(SpoutPlan(
+                spout=sp, liquid=tt.liquid, trial_type=lbl,
+                solenoid=cfg.solenoid_map[(tt.liquid, sp)],
+                volume_ul=tt.volume_ul, cue=tt.cue,
+                rewarded=flags[lbl].get(i, False)))
+
+        # Deterministic spout order so the raster and the log agree.
+        spouts.sort(key=lambda s: "lcr".index(s.spout))
 
         out.append(PlannedTrial(
             index=-1, block_index=block_pos, block_label=block.label,
-            block_kind=block.kind, ratio_level=level, ratio=ratio,
-            choice=True,
-            spouts=[
-                SpoutPlan(spout=side_a, liquid=la, trial_type=ta.label,
-                          solenoid=cfg.solenoid_map[(la, side_a)],
-                          volume_ul=ta.volume_ul, cue=ta.cue,
-                          rewarded=flags_a[i]),
-                SpoutPlan(spout=side_b, liquid=lb, trial_type=tb.label,
-                          solenoid=cfg.solenoid_map[(lb, side_b)],
-                          volume_ul=tb.volume_ul, cue=tb.cue,
-                          rewarded=flags_b[i]),
-            ],
+            block_kind=block.kind, ratio_level=level,
+            ratio=_ratio_for(cfg.operant, level, rng), choice=True,
+            spouts=spouts,
             iti_s=_truncated_exponential(rng, cfg.iti_mean_s - cfg.iti_min_s,
                                          cfg.iti_min_s, cfg.iti_max_s),
-            is_block_start=(i == 0), block_cue=block.cue if i == 0 else None))
+            is_block_start=(i == 0),
+            block_cue=block.cue if i == 0 else None))
     return out
 
 
@@ -1163,6 +1395,13 @@ def audit_session(sess: Session) -> dict:
         if hi - lo > len(cfg.blocks):
             report["problems"].append(
                 f"Ratio levels are unevenly filled: {per_level}")
+
+    if cfg.random_reward.any_enabled:
+        report["stats"]["uncued_trials"] = sum(1 for t in sess.trials if t.uncued)
+        report["stats"]["decoupled_trials"] = sum(1 for t in sess.trials
+                                                  if t.decoupled)
+        report["stats"]["free_rewards"] = sum(len(t.free_rewards)
+                                              for t in sess.trials)
 
     report["stats"].update({
         "n_trials": sess.n_trials,

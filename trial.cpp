@@ -121,6 +121,8 @@ bool trialAddSpout(uint8_t ch, uint8_t solIdx, uint32_t dispenseMs,
   // Refuse rather than guess. A spout whose extended position was
   // never captured would be driven to its retracted angle and the
   // animal would face a trial with nothing in reach.
+  if (!servoPresent(ch)) { emitErr(F("TRIAL_SPOUT_NOT_PRESENT_ON_THIS_RIG")); return false; }
+  if (!solPresent(solIdx)) { emitErr(F("TRIAL_SOLENOID_NOT_PRESENT")); return false; }
   if (!servoExtendSet(ch)) { emitErr(F("TRIAL_EXTEND_POSITION_NOT_SET")); return false; }
   if (!lickIsCalibrated(ch)) { emitErr(F("TRIAL_LICK_SENSOR_NOT_CALIBRATED")); return false; }
 
@@ -179,6 +181,7 @@ bool trialStart() {
   // Extend only the spouts in play. On a single-spout trial the other
   // spouts stay retracted, so the animal has no alternative to choose.
   for (uint8_t k = 0; k < SV_COUNT; k++) {
+    if (!servoPresent(k)) continue;
     if (g_sp[k].active) servoGoExtend(k);
     else                servoGoRetract(k);
   }

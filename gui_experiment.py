@@ -33,7 +33,10 @@ from arduino_link import ArduinoLink, ArduinoError, OUTCOME_NAMES
 from event_log import EventLog
 from session_runner import RunState, SessionRunner
 from calibration import CalibrationSet
-from gui_calibration import CalibrationPanel, ModulePanel, StepperPanel
+from stepper_cal import StepperCalibration
+from settings import (HardwareSettings, capture_from_board, restore_to_board)
+from gui_calibration import (CalibrationPanel, ModulePanel, StepperPanel,
+                             StepperTablePanel)
 
 SPOUT_NAMES = {"l": "Left", "c": "Center", "r": "Right"}
 
@@ -408,11 +411,14 @@ class LickPanel(QGroupBox):
 class InitTab(QWidget):
     link_changed = pyqtSignal(object)
 
-    def __init__(self, get_config, calibration=None):
+    def __init__(self, get_config, calibration=None, settings=None,
+                 stepper_calibration=None):
         super().__init__()
         self.get_config = get_config
         self.link: Optional[ArduinoLink] = None
         self.calibration = calibration or CalibrationSet()
+        self.stepper_cal = stepper_calibration or StepperCalibration()
+        self.settings = settings or HardwareSettings()
         self._raw = deque(maxlen=1200)
 
         outer = QVBoxLayout(self)
@@ -449,6 +455,31 @@ class InitTab(QWidget):
         self.port_hint.setWordWrap(True)
         lay.addWidget(self.port_hint)
         self.refresh_ports()
+
+        # ---- saved settings ----
+        g = QGroupBox("Settings from last time")
+        v = QVBoxLayout(g)
+        self.settings_note = QLabel(self.settings.staleness_note())
+        self.settings_note.setFont(_mono(9))
+        self.settings_note.setWordWrap(True)
+        v.addWidget(self.settings_note)
+        row = QHBoxLayout()
+        row.addWidget(_btn("Save what is on the board now", self.save_settings))
+        self.b_restore = _btn("Restore positions and identities",
+                              lambda: self.restore_settings(False))
+        row.addWidget(self.b_restore)
+        row.addWidget(_btn("Restore lick thresholds too",
+                           lambda: self.restore_settings(True)))
+        row.addStretch()
+        v.addLayout(row)
+        v.addWidget(QLabel(
+            "<i>Positions and identities describe the apparatus and restore "
+            "cleanly. Lick thresholds are yesterday's numbers \u2014 "
+            "baselines drift with humidity and saliva, so re-run the two "
+            "calibration steps before an animal goes on. Pump zero is "
+            "never restored: counted steps mean nothing across a power "
+            "cycle.</i>"))
+        lay.addWidget(g)
 
         # ---- spouts ----
         g = QGroupBox("Spout positions")
@@ -504,6 +535,13 @@ class InitTab(QWidget):
         # ---- volume calibration ----
         self.cal_panel = CalibrationPanel(self.calibration, lambda: self.link)
         lay.addWidget(self.cal_panel)
+
+        # ---- pump volume table ----
+        self.step_table = StepperTablePanel(
+            self.stepper_cal, lambda: self.link,
+            get_speed=lambda: self.steppers["l"].sps.value()
+            if hasattr(self, "steppers") else 600)
+        lay.addWidget(self.step_table)
 
         # ---- syringe pumps ----
         g = QGroupBox("Syringe pumps")
@@ -785,6 +823,43 @@ class InitTab(QWidget):
         self.b_conn.setText("Connect")
         self.conn_label.setText("not connected")
         self.link_changed.emit(None)
+
+    def save_settings(self):
+        if not self._need():
+            return
+        notes = capture_from_board(self.link, self.settings)
+        self.settings.calibration = self.calibration.to_json()
+        self.settings.stepper_calibration = self.stepper_cal.to_json()
+        self.settings.purge = self.cal_panel.purge_settings()
+        try:
+            path = self.settings.save()
+        except Exception as e:
+            QMessageBox.warning(self, "Could not save", str(e))
+            return
+        self.settings_note.setText(f"Saved to {path}")
+        if notes:
+            self.settings_note.setText(
+                f"Saved to {path}\nSome values could not be read: "
+                + "; ".join(notes))
+
+    def restore_settings(self, include_lick: bool):
+        if not self._need():
+            return
+        notes = restore_to_board(self.link, self.settings,
+                                 include_lick=include_lick)
+        for p in self.spouts.values():
+            p.read()
+        for p in self.licks.values():
+            p.read()
+        for p in self.steppers.values():
+            p.read()
+        self.refresh_solenoids()
+        head = ("Restored, including lick thresholds. Re-run the two "
+                "calibration steps anyway." if include_lick
+                else "Restored positions and identities.")
+        self.settings_note.setText(head + "  " + "  ".join(notes))
+        btn_ready(self.b_restore)
+        QTimer.singleShot(1200, lambda: btn_normal(self.b_restore))
 
     def _need(self) -> bool:
         if self.link is None:

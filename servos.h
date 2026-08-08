@@ -8,6 +8,12 @@ enum ServoCh : uint8_t { SV_L = 0, SV_C = 1, SV_R = 2, SV_COUNT = 3 };
 
 void servoBegin();
 
+// Whether this spout exists on the rig. An absent spout refuses motion
+// and is skipped by readiness checks, so a two-spout rig is never asked
+// to calibrate a centre spout it does not have.
+bool servoSetPresent(uint8_t ch, bool present);
+bool servoPresent(uint8_t ch);
+
 // Attach and drive to the fully-retracted zero angle for this
 // channel. Always allowed regardless of step size.
 bool servoInit(uint8_t ch);

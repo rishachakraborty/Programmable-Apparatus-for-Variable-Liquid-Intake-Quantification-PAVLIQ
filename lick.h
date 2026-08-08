@@ -7,6 +7,11 @@
 enum LickCh : uint8_t { LK_L = 0, LK_C = 1, LK_R = 2 };
 
 void lickBegin();
+
+// Whether this sensor exists on the rig. Absent channels are not
+// sampled and refuse calibration.
+bool lickSetPresent(uint8_t ch, bool present);
+bool lickPresent(uint8_t ch);
 void lickUpdate();
 
 // ---- calibration ----------------------------------------------

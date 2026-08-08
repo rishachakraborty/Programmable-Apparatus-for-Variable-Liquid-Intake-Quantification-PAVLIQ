@@ -17,6 +17,7 @@
 
 struct SolState {
   uint8_t  pin;
+  bool     present;
   char     liquid[SOL_LIQUID_NAME_LEN];
   uint8_t  spout;
   uint32_t nlPerMs;
@@ -34,8 +35,31 @@ static const char* const SPOUT_NAMES[4] = {"NONE", "L", "C", "R"};
 // ---------------------------------------------------------------
 
 static inline bool validIdx(uint8_t idx) {
-  if (idx >= SOL_COUNT_MAX) { emitErr(F("SOL_BAD_INDEX_USE_1_TO_4")); return false; }
+  if (idx >= SOL_COUNT_MAX) { emitErr(F("SOL_BAD_INDEX")); return false; }
   return true;
+}
+
+// Configuration is allowed on any channel; only actuation requires a
+// driver to be present, so an unwired gate cannot silently "deliver".
+static inline bool usableIdx(uint8_t idx) {
+  if (!validIdx(idx)) return false;
+  if (!g_sol[idx].present) {
+    emitErr(F("SOL_NOT_PRESENT_ON_THIS_RIG"));
+    return false;
+  }
+  return true;
+}
+
+bool solSetPresent(uint8_t idx, bool present) {
+  if (!validIdx(idx)) return false;
+  if (!present && g_sol[idx].open) rawClose(idx, NULL);
+  g_sol[idx].present = present;
+  solSaveToEeprom();
+  return true;
+}
+
+bool solPresent(uint8_t idx) {
+  return (idx < SOL_COUNT_MAX) && g_sol[idx].present;
 }
 
 static inline void markBlanking() {
@@ -49,12 +73,9 @@ bool solBlankingActive() {
 // ---------------------------------------------------------------
 
 void solBegin() {
-  g_sol[0].pin = PIN_SOL1;
-  g_sol[1].pin = PIN_SOL2;
-  g_sol[2].pin = PIN_SOL3;
-  g_sol[3].pin = PIN_SOL4;
-
   for (uint8_t k = 0; k < SOL_COUNT_MAX; k++) {
+    g_sol[k].pin     = PIN_SOL[k];
+    g_sol[k].present = SOL_PRESENT_DEFAULT[k];
     pinMode(g_sol[k].pin, OUTPUT);
     digitalWrite(g_sol[k].pin, LOW);      // fail closed
     g_sol[k].liquid[0] = '\0';
@@ -98,7 +119,8 @@ void solReportIdentity(uint8_t idx) {
   Serial.print(',');
   Serial.print(SPOUT_NAMES[g_sol[idx].spout]); Serial.print(',');
   Serial.print(g_sol[idx].nlPerMs);          Serial.print(',');
-  Serial.println(g_sol[idx].open ? 1 : 0);
+  Serial.print(g_sol[idx].open ? 1 : 0);     Serial.print(',');
+  Serial.println(g_sol[idx].present ? 1 : 0);
 }
 
 void solReportAll() {
@@ -120,6 +142,8 @@ uint32_t solCalibration(uint8_t idx) {
 }
 
 // ---- actuation -------------------------------------------------
+
+static void rawClose(uint8_t idx, const __FlashStringHelper* reason);
 
 static void rawOpen(uint8_t idx, bool timed, uint32_t plannedMs) {
   SolState& S = g_sol[idx];
@@ -148,7 +172,7 @@ static void rawClose(uint8_t idx, const __FlashStringHelper* reason) {
 }
 
 bool solOpen(uint8_t idx) {
-  if (!validIdx(idx)) return false;
+  if (!usableIdx(idx)) return false;
   if (g_sol[idx].open) { emitErr(F("SOL_ALREADY_OPEN")); return false; }
   rawOpen(idx, false, 0);
   return true;
@@ -162,7 +186,7 @@ bool solClose(uint8_t idx) {
 }
 
 bool solDispenseMs(uint8_t idx, uint32_t ms) {
-  if (!validIdx(idx)) return false;
+  if (!usableIdx(idx)) return false;
   if (ms == 0)                     { emitErr(F("SOL_DURATION_ZERO")); return false; }
   if (ms > SOL_DISPENSE_MAX_MS)    { emitErr(F("SOL_DURATION_ABOVE_MAX")); return false; }
   if (g_sol[idx].open)             { emitErr(F("SOL_ALREADY_OPEN")); return false; }
@@ -214,6 +238,7 @@ struct SolPersist {
   char     liquid[SOL_LIQUID_NAME_LEN];
   uint8_t  spout;
   uint32_t nlPerMs;
+  uint8_t  present;
 };
 
 void solSaveToEeprom() {
@@ -224,6 +249,7 @@ void solSaveToEeprom() {
     memcpy(p.liquid, g_sol[k].liquid, SOL_LIQUID_NAME_LEN);
     p.spout   = g_sol[k].spout;
     p.nlPerMs = g_sol[k].nlPerMs;
+    p.present = g_sol[k].present ? 1 : 0;
     EEPROM.put(addr, p);
     addr += sizeof(SolPersist);
   }
@@ -240,5 +266,6 @@ void solLoadFromEeprom() {
     memcpy(g_sol[k].liquid, p.liquid, SOL_LIQUID_NAME_LEN);
     g_sol[k].spout   = (p.spout <= SPOUT_R) ? p.spout : SPOUT_NONE;
     g_sol[k].nlPerMs = p.nlPerMs;
+    g_sol[k].present = (p.present != 0);
   }
 }
